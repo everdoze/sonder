@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Saturation.h"
+#include "Wavetable.h"
 
 #include <algorithm>
 #include <cmath>
@@ -14,7 +15,8 @@ namespace sonder
 class PolyBlepOscillator
 {
 public:
-    enum class Shape { saw, pulse, triangle, sine };
+    // Порядок совпадает с Choices::oscShapes()
+    enum class Shape { saw, pulse, triangle, sine, wavetable };
 
     void setSampleRate (double sampleRate) noexcept { invSampleRate = (float) (1.0 / sampleRate); }
 
@@ -57,8 +59,30 @@ public:
             case Shape::sine:
                 out = fastSinCycles (phase);
                 break;
+
+            case Shape::wavetable:
+                break;
         }
 
+        advance (dt);
+        return out;
+    }
+
+    // Чтение wavetable с той же фазой (суб-осциллятор и FM работают так же)
+    float processWavetable (float frequencyHz, const Wavetable& table, float position, int level) noexcept
+    {
+        const float dt = std::clamp (frequencyHz * invSampleRate, 0.0f, 0.5f);
+        const float out = table.sample (phase, position, level);
+        advance (dt);
+        return out;
+    }
+
+    // Значение суб-осциллятора для последнего вызова process()
+    float getSub() const noexcept { return subOut; }
+
+private:
+    void advance (float dt) noexcept
+    {
         // Суб: скачок на границе цикла, сглаживается тем же PolyBLEP
         subOut = subState;
         if (phase < dt)
@@ -72,14 +96,8 @@ public:
             phase -= 1.0f;
             subState = -subState;
         }
-
-        return out;
     }
 
-    // Значение суб-осциллятора для последнего вызова process()
-    float getSub() const noexcept { return subOut; }
-
-private:
     static float polyBlep (float t, float dt) noexcept
     {
         if (t < dt)

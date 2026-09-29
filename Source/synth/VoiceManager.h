@@ -28,9 +28,12 @@ public:
     uint32_t getActiveVoiceMask() const noexcept;
     float getLastNoteFrequency() const noexcept { return lastNoteFrequency; }
 
+    // Последний запущенный звучащий голос: по нему интерфейс рисует LFO и фильтр
+    const Voice* getDisplayVoice() const noexcept;
+
 private:
-    void handleMessage (const juce::MidiMessage& message, const SynthParams& params);
-    void noteOn (int note, float velocity, const SynthParams& params);
+    void handleMessage (const juce::MidiMessage& message, const SynthParams& params, const ModulationBus& bus, int position);
+    void noteOn (int note, float velocity, const SynthParams& params, const ModulationBus& bus, int position);
     void noteOff (int note);
     void releaseSustainedNotes();
     int chooseVoice (int polyphony) const;
@@ -55,6 +58,7 @@ private:
 
     VoiceMode currentMode = VoiceMode::poly;
     int nextVoice = 0;
+    int lastStartedVoice = -1;
     uint64_t orderCounter = 0;
     float lastPitch = -1.0f;
     float lastNoteFrequency = 0.0f;

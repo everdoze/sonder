@@ -1,5 +1,8 @@
 #pragma once
 
+#include "dsp/LfoShapes.h"
+#include "dsp/WavetableBank.h"
+
 #include <juce_audio_processors/juce_audio_processors.h>
 
 namespace sonder
@@ -19,7 +22,7 @@ public:
         juce::File file;
     };
 
-    explicit PresetManager (juce::AudioProcessorValueTreeState& state);
+    PresetManager (juce::AudioProcessorValueTreeState& state, LfoShapeBank& lfoShapes, WavetableBank& wavetables);
 
     void refresh();
 
@@ -45,6 +48,8 @@ private:
     void setCurrent (int index);
 
     juce::AudioProcessorValueTreeState& state;
+    LfoShapeBank& lfoShapes;
+    WavetableBank& wavetables;
     std::vector<Preset> presets;
     int currentIndex = 0;
 };

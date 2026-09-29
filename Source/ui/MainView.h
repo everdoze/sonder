@@ -1,6 +1,9 @@
 #pragma once
 
 #include "Controls.h"
+#include "FilterView.h"
+#include "LfoPanel.h"
+#include "OscillatorView.h"
 #include "PresetBar.h"
 #include "ScopeView.h"
 
@@ -11,11 +14,12 @@ class SonderAudioProcessor;
 namespace sonder::ui
 {
 
-// Всё содержимое окна в фиксированных "дизайн-координатах"; редактор масштабирует его целиком
-class MainView final : public juce::Component, private juce::Timer
+// Всё содержимое окна в фиксированных "дизайн-координатах"; редактор масштабирует его целиком.
+// Три страницы: SYNTH (звук), MOD (мод-матрица), FX (эффекты).
+class MainView final : public juce::Component, public juce::DragAndDropContainer
 {
 public:
-    static constexpr int kWidth = 1240;
+    static constexpr int kWidth = 1400;
 
     MainView (SonderAudioProcessor& processor, bool showKeyboard);
 
@@ -25,33 +29,40 @@ public:
     void resized() override;
 
 private:
+    enum Page { synthPage, modPage, fxPage, numPages };
+
     struct Panel
     {
         juce::String title;
+        Page page = synthPage;
         juce::Rectangle<int> bounds;
         std::vector<juce::Component*> cells; // nullptr - пустая ячейка
         int columns = 1;
-        juce::Component* display = nullptr;  // график над ручками
+        juce::Component* display = nullptr;  // экран над ручками
         int displayHeight = 0;
     };
 
-    void timerCallback() override;
-
     ParameterControl* control (const char* id, const char* label);
-    Panel& addPanel (const juce::String& title, juce::Rectangle<int> bounds, int columns,
+    Panel& addPanel (Page page, const juce::String& title, juce::Rectangle<int> bounds, int columns,
                      std::initializer_list<std::pair<const char*, const char*>> items);
     void layoutPanel (Panel& panel);
+    void showPage (Page page);
 
     SonderAudioProcessor& processor;
     const bool showKeyboard;
+    Page currentPage = synthPage;
 
     std::vector<std::unique_ptr<ParameterControl>> controls;
     std::map<juce::String, ParameterControl*> controlsById;
     std::vector<Panel> panels;
 
+    std::array<juce::TextButton, numPages> pageButtons;
+    OscillatorView osc1View, osc2View;
+    FilterView filterView;
     ScopeView scopeView;
     EnvelopeView filterEnvelopeView, ampEnvelopeView;
-    LfoView lfo1View, lfo2View;
+    ModSourceHandle filterEnvelopeHandle, ampEnvelopeHandle;
+    LfoPanel lfoPanel;
     std::vector<std::unique_ptr<ModSlotView>> modSlots;
     PresetBar presetBar;
     VoiceLeds voiceLeds;

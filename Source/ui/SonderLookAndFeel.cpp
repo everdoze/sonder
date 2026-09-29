@@ -91,6 +91,42 @@ void SonderLookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, int w
         g.strokePath (value, { lineWidth, juce::PathStrokeType::curved, juce::PathStrokeType::rounded });
     }
 
+    // Модуляция: кольцо диапазона между дорожкой и корпусом и точка живого значения
+    const auto& properties = slider.getProperties();
+    if ((bool) properties.getWithDefault ("modActive", false))
+    {
+        const float ringRadius = arcRadius - lineWidth * 0.5f - 2.2f;
+        const auto angleFor = [&] (float normalised) { return rotaryStartAngle + normalised * (rotaryEndAngle - rotaryStartAngle); };
+        const float a0 = angleFor ((float) properties.getWithDefault ("modMin", 0.0f));
+        const float a1 = angleFor ((float) properties.getWithDefault ("modMax", 0.0f));
+
+        if (std::abs (a1 - a0) > 0.02f)
+        {
+            juce::Path ring;
+            ring.addCentredArc (centre.x, centre.y, ringRadius, ringRadius, 0.0f, juce::jmin (a0, a1), juce::jmax (a0, a1), true);
+            g.setColour (Palette::accentBright.withAlpha (0.85f));
+            g.strokePath (ring, { 1.8f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded });
+        }
+
+        const float live = properties.getWithDefault ("modLive", -1.0f);
+        if (live >= 0.0f)
+        {
+            const float a = angleFor (live);
+            const juce::Point<float> dot (centre.x + ringRadius * std::sin (a), centre.y - ringRadius * std::cos (a));
+            g.setColour (Palette::accent.withAlpha (0.4f));
+            g.fillEllipse (juce::Rectangle<float> (8.0f, 8.0f).withCentre (dot));
+            g.setColour (juce::Colours::white);
+            g.fillEllipse (juce::Rectangle<float> (4.5f, 4.5f).withCentre (dot));
+        }
+    }
+
+    // Сюда можно бросить источник модуляции
+    if ((bool) properties.getWithDefault ("dropTarget", false))
+    {
+        g.setColour (Palette::accent.withAlpha (0.25f));
+        g.fillEllipse (juce::Rectangle<float> (arcRadius * 2.0f + 6.0f, arcRadius * 2.0f + 6.0f).withCentre (centre));
+    }
+
     // Корпус ручки
     const float bodyRadius = arcRadius - lineWidth - 3.5f;
     const auto body = juce::Rectangle<float> (bodyRadius * 2.0f, bodyRadius * 2.0f).withCentre (centre);
@@ -185,9 +221,10 @@ juce::Font SonderLookAndFeel::getComboBoxFont (juce::ComboBox&)
 
 void SonderLookAndFeel::positionComboBoxText (juce::ComboBox& box, juce::Label& label)
 {
-    label.setBounds (6, 1, box.getWidth() - 22, box.getHeight() - 2);
+    label.setBounds (5, 1, box.getWidth() - 19, box.getHeight() - 2);
     label.setFont (getComboBoxFont (box));
     label.setJustificationType (juce::Justification::centredLeft);
+    label.setMinimumHorizontalScale (0.6f); // в узких ячейках текст сжимается, а не обрезается
 }
 
 juce::Font SonderLookAndFeel::getPopupMenuFont()
@@ -199,11 +236,13 @@ void SonderLookAndFeel::drawButtonBackground (juce::Graphics& g, juce::Button& b
                                               bool isMouseOverButton, bool isButtonDown)
 {
     const auto bounds = button.getLocalBounds().toFloat().reduced (0.5f);
+    const bool on = button.getToggleState();
 
-    g.setColour (isButtonDown ? Palette::accentDim.withAlpha (0.5f) : Palette::deep);
+    g.setColour (isButtonDown ? Palette::accentDim.withAlpha (0.5f)
+                              : (on ? Palette::accent.withAlpha (0.18f) : Palette::deep));
     g.fillRoundedRectangle (bounds, 4.0f);
 
-    g.setColour (isMouseOverButton ? Palette::accent : Palette::outline);
+    g.setColour (on || isMouseOverButton ? Palette::accent : Palette::outline);
     g.drawRoundedRectangle (bounds, 4.0f, 1.0f);
 }
 

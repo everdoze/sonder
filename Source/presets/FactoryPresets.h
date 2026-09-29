@@ -18,6 +18,8 @@ struct FactoryPreset
     const char* name;
     const char* category;
     std::vector<PresetValue> values;
+    const char* wavetable1 = nullptr; // встроенная wavetable, nullptr - по умолчанию
+    const char* wavetable2 = nullptr;
 };
 
 const std::vector<FactoryPreset>& getFactoryPresets();

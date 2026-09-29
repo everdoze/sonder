@@ -68,7 +68,7 @@ void VoiceManager::render (float* left, float* right, int numSamples, const juce
             position = eventPosition;
         }
 
-        handleMessage (metadata.getMessage(), params);
+        handleMessage (metadata.getMessage(), params, bus, eventPosition);
     }
 
     if (position < numSamples)
@@ -100,11 +100,12 @@ void VoiceManager::renderSegment (float* left, float* right, int start, int end,
         voices[v].render (left, right, start, end - start, params, bus, unitTolerances[v]);
 }
 
-void VoiceManager::handleMessage (const juce::MidiMessage& message, const SynthParams& params)
+void VoiceManager::handleMessage (const juce::MidiMessage& message, const SynthParams& params,
+                                  const ModulationBus& bus, int position)
 {
     if (message.isNoteOn())
     {
-        noteOn (message.getNoteNumber(), message.getFloatVelocity(), params);
+        noteOn (message.getNoteNumber(), message.getFloatVelocity(), params, bus, position);
     }
     else if (message.isNoteOff())
     {
@@ -152,7 +153,7 @@ void VoiceManager::handleMessage (const juce::MidiMessage& message, const SynthP
     }
 }
 
-void VoiceManager::noteOn (int note, float velocity, const SynthParams& params)
+void VoiceManager::noteOn (int note, float velocity, const SynthParams& params, const ModulationBus& bus, int position)
 {
     keyDown[(size_t) note] = true;
     sustained[(size_t) note] = false;
@@ -176,8 +177,9 @@ void VoiceManager::noteOn (int note, float velocity, const SynthParams& params)
         if (index < 0)
             index = chooseVoice (polyphony);
 
-        voices[(size_t) index].start (note, velocity, glideFrom, true);
+        voices[(size_t) index].start (note, velocity, glideFrom, true, params, bus, position);
         voiceOrder[(size_t) index] = ++orderCounter;
+        lastStartedVoice = index;
         nextVoice = (index + 1) % polyphony;
         return;
     }
@@ -196,7 +198,8 @@ void VoiceManager::noteOn (int note, float velocity, const SynthParams& params)
     if (glideEnabled)
         glideFrom = voice.isActive() ? voice.getCurrentPitch() : previousPitch;
 
-    voice.start (note, velocity, glideFrom, true);
+    voice.start (note, velocity, glideFrom, true, params, bus, position);
+    lastStartedVoice = 0;
 }
 
 int VoiceManager::chooseVoice (int polyphony) const
@@ -306,6 +309,14 @@ void VoiceManager::allNotesOff (bool immediately)
     numHeldNotes = 0;
     keyDown.fill (false);
     sustained.fill (false);
+}
+
+const Voice* VoiceManager::getDisplayVoice() const noexcept
+{
+    if (juce::isPositiveAndBelow (lastStartedVoice, kMaxVoices) && voices[(size_t) lastStartedVoice].isActive())
+        return &voices[(size_t) lastStartedVoice];
+
+    return nullptr;
 }
 
 uint32_t VoiceManager::getActiveVoiceMask() const noexcept

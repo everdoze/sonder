@@ -3,25 +3,49 @@
 namespace sonder
 {
 
-juce::String ParamIDs::modSource (int slot) { return "mod" + juce::String (slot + 1) + "Source"; }
-juce::String ParamIDs::modDest (int slot)   { return "mod" + juce::String (slot + 1) + "Dest"; }
-juce::String ParamIDs::modAmount (int slot) { return "mod" + juce::String (slot + 1) + "Amount"; }
+namespace
+{
+    juce::String numbered (const char* prefix, int index, const char* suffix)
+    {
+        return prefix + juce::String (index + 1) + suffix;
+    }
+}
+
+juce::String ParamIDs::lfoShape (int lfo)   { return numbered ("lfo", lfo, "Shape"); }
+juce::String ParamIDs::lfoRate (int lfo)    { return numbered ("lfo", lfo, "Rate"); }
+juce::String ParamIDs::lfoSync (int lfo)    { return numbered ("lfo", lfo, "Sync"); }
+juce::String ParamIDs::lfoMode (int lfo)    { return numbered ("lfo", lfo, "Mode"); }
+juce::String ParamIDs::modSource (int slot) { return numbered ("mod", slot, "Source"); }
+juce::String ParamIDs::modDest (int slot)   { return numbered ("mod", slot, "Dest"); }
+juce::String ParamIDs::modAmount (int slot) { return numbered ("mod", slot, "Amount"); }
 
 const juce::StringArray& Choices::oscShapes()
 {
-    static const juce::StringArray list { "Saw", "Pulse", "Triangle", "Sine" };
+    static const juce::StringArray list { "Saw", "Pulse", "Triangle", "Sine", "Wavetable" };
     return list;
 }
 
 const juce::StringArray& Choices::filterModes()
 {
-    static const juce::StringArray list { "LP 24", "LP 12", "Band", "High" };
+    static const juce::StringArray list { "LP 24", "LP 12", "Band", "High", "Vowel" };
+    return list;
+}
+
+const juce::StringArray& Choices::distTypes()
+{
+    static const juce::StringArray list { "Off", "Tube", "Hard", "Fold", "Crush" };
     return list;
 }
 
 const juce::StringArray& Choices::lfoShapes()
 {
-    static const juce::StringArray list { "Sine", "Triangle", "Saw Up", "Saw Down", "Square", "S&H", "Smooth" };
+    static const juce::StringArray list { "Sine", "Triangle", "Saw Up", "Saw Down", "Square", "S&H", "Smooth", "Custom" };
+    return list;
+}
+
+const juce::StringArray& Choices::lfoModes()
+{
+    static const juce::StringArray list { "Free", "Retrig", "Env" };
     return list;
 }
 
@@ -42,14 +66,18 @@ double syncDivisionInBeats (int index)
 const juce::StringArray& Choices::modSources()
 {
     static const juce::StringArray list { "Off", "LFO 1", "LFO 2", "Filter Env", "Amp Env", "Velocity",
-                                          "Mod Wheel", "Aftertouch", "Key", "Random" };
+                                          "Mod Wheel", "Aftertouch", "Key", "Random",
+                                          "LFO 3", "LFO 4", "LFO 5", "LFO 6", "LFO 7", "LFO 8" };
     return list;
 }
 
 const juce::StringArray& Choices::modDestinations()
 {
     static const juce::StringArray list { "Off", "Pitch", "Osc 1 Pitch", "Osc 2 Pitch", "Pulse Width", "Osc Mix",
-                                          "FM", "Fold", "Sub", "Noise", "Cutoff", "Resonance", "Drive", "Amp", "Pan" };
+                                          "FM", "Fold", "Sub", "Noise", "Cutoff", "Resonance", "Drive", "Amp", "Pan",
+                                          "Vowel", "Dist Drive", "Dist Mix", "Osc 1 WT Pos", "Osc 2 WT Pos",
+                                          "LFO 1 Rate", "LFO 2 Rate", "LFO 3 Rate", "LFO 4 Rate",
+                                          "LFO 5 Rate", "LFO 6 Rate", "LFO 7 Rate", "LFO 8 Rate" };
     return list;
 }
 
@@ -92,6 +120,15 @@ namespace
     {
         const auto percent = juce::roundToInt (value * 100.0f);
         return (percent > 0 ? "+" : "") + juce::String (percent) + "%";
+    }
+
+    juce::String formatVowel (float value, int)
+    {
+        static const char* vowels[] { "A", "E", "I", "O", "U" };
+        const float position = value * 4.0f;
+        const int index = juce::jlimit (0, 4, juce::roundToInt (position));
+        return std::abs (position - (float) index) < 0.1f ? juce::String (vowels[index])
+                                                          : juce::String (vowels[(int) position]) + ">" + vowels[juce::jmin (4, (int) position + 1)];
     }
 
     std::unique_ptr<juce::AudioParameterFloat> makeFloat (const juce::String& id, const juce::String& name,
@@ -138,6 +175,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
     // Осцилляторы
     layout.add (makeChoice (osc1Shape, "Osc 1 Shape", Choices::oscShapes(), 0),
                 makeChoice (osc2Shape, "Osc 2 Shape", Choices::oscShapes(), 0),
+                makeFloat (osc1WtPos,  "Osc 1 WT Position", unitRange(), 0.0f, formatPercent),
+                makeFloat (osc2WtPos,  "Osc 2 WT Position", unitRange(), 0.0f, formatPercent),
                 makeInt (osc2Semi, "Osc 2 Semitones", -24, 24, 0,
                          [] (int v, int) { return (v > 0 ? "+" : "") + juce::String (v) + " st"; }),
                 makeFloat (osc2Fine,   "Osc 2 Fine",  { -50.0f, 50.0f }, 7.0f, formatCents),
@@ -151,12 +190,19 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
 
     // Фильтр
     layout.add (makeChoice (filterMode, "Filter Mode", Choices::filterModes(), 0),
-                makeFloat (cutoff,       "Cutoff",            skewed (20.0f, 20000.0f, 1000.0f), 2000.0f, formatHz),
-                makeFloat (resonance,    "Resonance",         unitRange(),    0.25f, formatPercent),
-                makeFloat (drive,        "Drive",             unitRange(),    0.3f,  formatPercent),
-                makeFloat (filterEnvAmt, "Filter Env Amount", bipolarRange(), 0.35f, formatBipolarPercent),
-                makeFloat (keyTrack,     "Key Tracking",      unitRange(),    0.5f,  formatPercent),
-                makeFloat (velToCutoff,  "Velocity to Cutoff", unitRange(),   0.2f,  formatPercent));
+                makeFloat (cutoff,       "Cutoff",             skewed (20.0f, 20000.0f, 1000.0f), 2000.0f, formatHz),
+                makeFloat (resonance,    "Resonance",          unitRange(),    0.25f, formatPercent),
+                makeFloat (drive,        "Drive",              unitRange(),    0.3f,  formatPercent),
+                makeFloat (vowel,        "Vowel",              unitRange(),    0.0f,  formatVowel),
+                makeFloat (filterEnvAmt, "Filter Env Amount",  bipolarRange(), 0.35f, formatBipolarPercent),
+                makeFloat (keyTrack,     "Key Tracking",       unitRange(),    0.5f,  formatPercent),
+                makeFloat (velToCutoff,  "Velocity to Cutoff", unitRange(),    0.2f,  formatPercent));
+
+    // Дисторшн после фильтра
+    layout.add (makeChoice (distType, "Distortion Type", Choices::distTypes(), 0),
+                makeFloat (distDrive, "Distortion Drive", unitRange(), 0.4f, formatPercent),
+                makeFloat (distMix,   "Distortion Mix",   unitRange(), 1.0f, formatPercent),
+                makeFloat (distTone,  "Distortion Tone",  unitRange(), 1.0f, formatPercent));
 
     // Огибающие
     layout.add (makeFloat (filterAttack,  "Filter Attack",  timeRange(), 0.005f, formatTime),
@@ -170,12 +216,16 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
                 makeFloat (ampVelocity,   "Amp Velocity",   unitRange(), 0.6f,   formatPercent));
 
     // LFO
-    layout.add (makeChoice (lfo1Shape, "LFO 1 Shape", Choices::lfoShapes(), 0),
-                makeFloat (lfo1Rate, "LFO 1 Rate", skewed (0.02f, 40.0f, 2.0f), 3.0f, formatHz),
-                makeChoice (lfo1Sync, "LFO 1 Sync", Choices::syncDivisions(), 0),
-                makeChoice (lfo2Shape, "LFO 2 Shape", Choices::lfoShapes(), 1),
-                makeFloat (lfo2Rate, "LFO 2 Rate", skewed (0.02f, 40.0f, 2.0f), 0.4f, formatHz),
-                makeChoice (lfo2Sync, "LFO 2 Sync", Choices::syncDivisions(), 0));
+    for (int lfo = 0; lfo < kNumLfos; ++lfo)
+    {
+        const auto prefix = "LFO " + juce::String (lfo + 1) + " ";
+        const float defaultRate = lfo == 0 ? 3.0f : (lfo == 1 ? 0.4f : 1.0f);
+
+        layout.add (makeChoice (lfoShape (lfo), prefix + "Shape", Choices::lfoShapes(), lfo == 1 ? 1 : 0),
+                    makeFloat (lfoRate (lfo), prefix + "Rate", skewed (0.02f, 40.0f, 2.0f), defaultRate, formatHz),
+                    makeChoice (lfoSync (lfo), prefix + "Sync", Choices::syncDivisions(), 0),
+                    makeChoice (lfoMode (lfo), prefix + "Mode", Choices::lfoModes(), 0));
+    }
 
     // Мод-матрица
     for (int slot = 0; slot < kNumModSlots; ++slot)
@@ -229,6 +279,8 @@ ParameterRefs::ParameterRefs (juce::AudioProcessorValueTreeState& state)
 
     osc1Shape = get (ParamIDs::osc1Shape);
     osc2Shape = get (ParamIDs::osc2Shape);
+    osc1WtPos = get (ParamIDs::osc1WtPos);
+    osc2WtPos = get (ParamIDs::osc2WtPos);
     osc2Semi = get (ParamIDs::osc2Semi);
     osc2Fine = get (ParamIDs::osc2Fine);
     oscMix = get (ParamIDs::oscMix);
@@ -243,9 +295,15 @@ ParameterRefs::ParameterRefs (juce::AudioProcessorValueTreeState& state)
     cutoff = get (ParamIDs::cutoff);
     resonance = get (ParamIDs::resonance);
     drive = get (ParamIDs::drive);
+    vowel = get (ParamIDs::vowel);
     filterEnvAmt = get (ParamIDs::filterEnvAmt);
     keyTrack = get (ParamIDs::keyTrack);
     velToCutoff = get (ParamIDs::velToCutoff);
+
+    distType = get (ParamIDs::distType);
+    distDrive = get (ParamIDs::distDrive);
+    distMix = get (ParamIDs::distMix);
+    distTone = get (ParamIDs::distTone);
 
     filterAttack = get (ParamIDs::filterAttack);
     filterDecay = get (ParamIDs::filterDecay);
@@ -258,12 +316,13 @@ ParameterRefs::ParameterRefs (juce::AudioProcessorValueTreeState& state)
     ampRelease = get (ParamIDs::ampRelease);
     ampVelocity = get (ParamIDs::ampVelocity);
 
-    lfo1Shape = get (ParamIDs::lfo1Shape);
-    lfo1Rate = get (ParamIDs::lfo1Rate);
-    lfo1Sync = get (ParamIDs::lfo1Sync);
-    lfo2Shape = get (ParamIDs::lfo2Shape);
-    lfo2Rate = get (ParamIDs::lfo2Rate);
-    lfo2Sync = get (ParamIDs::lfo2Sync);
+    for (int lfo = 0; lfo < kNumLfos; ++lfo)
+    {
+        lfoShape[(size_t) lfo] = get (ParamIDs::lfoShape (lfo));
+        lfoRate[(size_t) lfo] = get (ParamIDs::lfoRate (lfo));
+        lfoSync[(size_t) lfo] = get (ParamIDs::lfoSync (lfo));
+        lfoMode[(size_t) lfo] = get (ParamIDs::lfoMode (lfo));
+    }
 
     for (int slot = 0; slot < kNumModSlots; ++slot)
     {

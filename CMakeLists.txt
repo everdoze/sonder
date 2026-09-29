@@ -1,6 +1,6 @@
-cmake_minimum_required(VERSION 3.22)
+﻿cmake_minimum_required(VERSION 3.22)
 
-project(Sonder VERSION 0.1.0 LANGUAGES C CXX)
+project(Sonder VERSION 1.0.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -34,12 +34,19 @@ target_sources(Sonder
         Source/PluginProcessor.h
         Source/ScopeBuffer.h
         Source/dsp/AnalogEnvelope.h
+        Source/dsp/Distortion.h
         Source/dsp/FastRandom.h
+        Source/dsp/FormantFilter.h
         Source/dsp/LadderFilter.h
-        Source/dsp/Lfo.h
+        Source/dsp/LfoShapes.cpp
+        Source/dsp/LfoShapes.h
         Source/dsp/PolyBlepOscillator.h
         Source/dsp/Saturation.h
         Source/dsp/SmoothNoise.h
+        Source/dsp/Wavetable.cpp
+        Source/dsp/Wavetable.h
+        Source/dsp/WavetableBank.cpp
+        Source/dsp/WavetableBank.h
         Source/fx/Chorus.h
         Source/fx/TapeDelay.h
         Source/presets/FactoryPresets.cpp
@@ -53,8 +60,16 @@ target_sources(Sonder
         Source/synth/VoiceManager.h
         Source/ui/Controls.cpp
         Source/ui/Controls.h
+        Source/ui/FilterView.cpp
+        Source/ui/FilterView.h
+        Source/ui/LfoEditor.cpp
+        Source/ui/LfoEditor.h
+        Source/ui/LfoPanel.cpp
+        Source/ui/LfoPanel.h
         Source/ui/MainView.cpp
         Source/ui/MainView.h
+        Source/ui/OscillatorView.cpp
+        Source/ui/OscillatorView.h
         Source/ui/PresetBar.cpp
         Source/ui/PresetBar.h
         Source/ui/ScopeView.cpp

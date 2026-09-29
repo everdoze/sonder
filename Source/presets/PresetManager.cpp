@@ -10,8 +10,8 @@ namespace
     const juce::String presetExtension { ".sonderpreset" };
 }
 
-PresetManager::PresetManager (juce::AudioProcessorValueTreeState& s)
-    : state (s)
+PresetManager::PresetManager (juce::AudioProcessorValueTreeState& s, LfoShapeBank& shapes, WavetableBank& tables)
+    : state (s), lfoShapes (shapes), wavetables (tables)
 {
     refresh();
 }
@@ -66,13 +66,25 @@ void PresetManager::load (int index)
 
     if (preset.isFactory)
     {
-        for (const auto& [id, value] : getFactoryPresets()[(size_t) preset.factoryIndex].values)
+        const auto& factory = getFactoryPresets()[(size_t) preset.factoryIndex];
+        for (const auto& [id, value] : factory.values)
             values[id] = value;
+
+        lfoShapes.resetAll();
+        wavetables.resetToDefault();
+
+        if (factory.wavetable1 != nullptr)
+            wavetables.select (0, juce::String ("builtin:") + factory.wavetable1);
+        if (factory.wavetable2 != nullptr)
+            wavetables.select (1, juce::String ("builtin:") + factory.wavetable2);
     }
     else if (auto xml = juce::parseXML (preset.file))
     {
         for (auto* param : xml->getChildWithTagNameIterator ("Param"))
             values[param->getStringAttribute ("id")] = (float) param->getDoubleAttribute ("value");
+
+        lfoShapes.fromXml (xml->getChildByName ("LfoShapes"));
+        wavetables.fromXml (xml->getChildByName ("Wavetables"));
     }
     else
     {
@@ -133,7 +145,7 @@ bool PresetManager::saveUserPreset (const juce::String& name)
 
     juce::XmlElement xml ("SonderPreset");
     xml.setAttribute ("name", trimmed);
-    xml.setAttribute ("version", 1);
+    xml.setAttribute ("version", 2);
 
     for (auto* parameter : state.processor.getParameters())
     {
@@ -144,6 +156,9 @@ bool PresetManager::saveUserPreset (const juce::String& name)
             child->setAttribute ("value", ranged->convertFrom0to1 (ranged->getValue()));
         }
     }
+
+    xml.addChildElement (lfoShapes.toXml().release());
+    xml.addChildElement (wavetables.toXml().release());
 
     const auto file = directory.getChildFile (juce::File::createLegalFileName (trimmed) + presetExtension);
     if (! xml.writeTo (file))

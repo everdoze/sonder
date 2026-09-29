@@ -5,12 +5,15 @@
 namespace sonder
 {
 
-inline constexpr int kNumModSlots = 6;
+inline constexpr int kNumModSlots = 32;
+inline constexpr int kNumLfos = 8;
 
 namespace ParamIDs
 {
     inline constexpr auto osc1Shape     = "osc1Shape";
     inline constexpr auto osc2Shape     = "osc2Shape";
+    inline constexpr auto osc1WtPos     = "osc1WtPos";
+    inline constexpr auto osc2WtPos     = "osc2WtPos";
     inline constexpr auto osc2Semi      = "osc2Semi";
     inline constexpr auto osc2Fine      = "osc2Fine";
     inline constexpr auto oscMix        = "oscMix";
@@ -25,9 +28,15 @@ namespace ParamIDs
     inline constexpr auto cutoff        = "cutoff";
     inline constexpr auto resonance     = "resonance";
     inline constexpr auto drive         = "drive";
+    inline constexpr auto vowel         = "vowel";
     inline constexpr auto filterEnvAmt  = "filterEnvAmt";
     inline constexpr auto keyTrack      = "keyTrack";
     inline constexpr auto velToCutoff   = "velToCutoff";
+
+    inline constexpr auto distType      = "distType";
+    inline constexpr auto distDrive     = "distDrive";
+    inline constexpr auto distMix       = "distMix";
+    inline constexpr auto distTone      = "distTone";
 
     inline constexpr auto filterAttack  = "filterAttack";
     inline constexpr auto filterDecay   = "filterDecay";
@@ -39,13 +48,6 @@ namespace ParamIDs
     inline constexpr auto ampSustain    = "ampSustain";
     inline constexpr auto ampRelease    = "ampRelease";
     inline constexpr auto ampVelocity   = "ampVelocity";
-
-    inline constexpr auto lfo1Shape     = "lfo1Shape";
-    inline constexpr auto lfo1Rate      = "lfo1Rate";
-    inline constexpr auto lfo1Sync      = "lfo1Sync";
-    inline constexpr auto lfo2Shape     = "lfo2Shape";
-    inline constexpr auto lfo2Rate      = "lfo2Rate";
-    inline constexpr auto lfo2Sync      = "lfo2Sync";
 
     inline constexpr auto drift         = "drift";
     inline constexpr auto jitter        = "jitter";
@@ -74,18 +76,27 @@ namespace ParamIDs
 
     inline constexpr auto masterGain    = "masterGain";
 
-    // Слоты мод-матрицы, slot с нуля: "mod1Source", "mod1Dest", "mod1Amount"...
+    // LFO с нуля: "lfo1Shape", "lfo1Rate", "lfo1Sync", "lfo1Mode"...
+    juce::String lfoShape (int lfo);
+    juce::String lfoRate (int lfo);
+    juce::String lfoSync (int lfo);
+    juce::String lfoMode (int lfo);
+
+    // Слоты мод-матрицы с нуля: "mod1Source", "mod1Dest", "mod1Amount"...
     juce::String modSource (int slot);
     juce::String modDest (int slot);
     juce::String modAmount (int slot);
 }
 
-// Списки вариантов для choice-параметров. Порядок совпадает с enum'ами в DSP-коде.
+// Списки вариантов для choice-параметров. Порядок совпадает с enum'ами в DSP-коде;
+// новые варианты только дописываются в конец, чтобы не ломать сохранённые пресеты.
 namespace Choices
 {
     const juce::StringArray& oscShapes();
     const juce::StringArray& filterModes();
+    const juce::StringArray& distTypes();
     const juce::StringArray& lfoShapes();
+    const juce::StringArray& lfoModes();
     const juce::StringArray& syncDivisions();
     const juce::StringArray& modSources();
     const juce::StringArray& modDestinations();
@@ -101,76 +112,27 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
 // Указатели на значения параметров для чтения из аудиопотока без поиска по строкам
 struct ParameterRefs
 {
+    using Ref = std::atomic<float>*;
+
     explicit ParameterRefs (juce::AudioProcessorValueTreeState& state);
 
-    std::atomic<float>* osc1Shape;
-    std::atomic<float>* osc2Shape;
-    std::atomic<float>* osc2Semi;
-    std::atomic<float>* osc2Fine;
-    std::atomic<float>* oscMix;
-    std::atomic<float>* pulseWidth;
-    std::atomic<float>* subLevel;
-    std::atomic<float>* noiseLevel;
-    std::atomic<float>* fmAmount;
-    std::atomic<float>* ringLevel;
-    std::atomic<float>* foldAmount;
+    Ref osc1Shape, osc2Shape, osc1WtPos, osc2WtPos, osc2Semi, osc2Fine, oscMix, pulseWidth;
+    Ref subLevel, noiseLevel, fmAmount, ringLevel, foldAmount;
 
-    std::atomic<float>* filterMode;
-    std::atomic<float>* cutoff;
-    std::atomic<float>* resonance;
-    std::atomic<float>* drive;
-    std::atomic<float>* filterEnvAmt;
-    std::atomic<float>* keyTrack;
-    std::atomic<float>* velToCutoff;
+    Ref filterMode, cutoff, resonance, drive, vowel, filterEnvAmt, keyTrack, velToCutoff;
+    Ref distType, distDrive, distMix, distTone;
 
-    std::atomic<float>* filterAttack;
-    std::atomic<float>* filterDecay;
-    std::atomic<float>* filterSustain;
-    std::atomic<float>* filterRelease;
+    Ref filterAttack, filterDecay, filterSustain, filterRelease;
+    Ref ampAttack, ampDecay, ampSustain, ampRelease, ampVelocity;
 
-    std::atomic<float>* ampAttack;
-    std::atomic<float>* ampDecay;
-    std::atomic<float>* ampSustain;
-    std::atomic<float>* ampRelease;
-    std::atomic<float>* ampVelocity;
+    std::array<Ref, kNumLfos> lfoShape, lfoRate, lfoSync, lfoMode;
+    std::array<Ref, kNumModSlots> modSource, modDest, modAmount;
 
-    std::atomic<float>* lfo1Shape;
-    std::atomic<float>* lfo1Rate;
-    std::atomic<float>* lfo1Sync;
-    std::atomic<float>* lfo2Shape;
-    std::atomic<float>* lfo2Rate;
-    std::atomic<float>* lfo2Sync;
+    Ref drift, jitter, spread, sag, warmup, unit;
+    Ref voiceMode, unisonVoices, unisonDetune, unisonWidth, glide, bendRange, vibrato;
 
-    std::array<std::atomic<float>*, kNumModSlots> modSource;
-    std::array<std::atomic<float>*, kNumModSlots> modDest;
-    std::array<std::atomic<float>*, kNumModSlots> modAmount;
-
-    std::atomic<float>* drift;
-    std::atomic<float>* jitter;
-    std::atomic<float>* spread;
-    std::atomic<float>* sag;
-    std::atomic<float>* warmup;
-    std::atomic<float>* unit;
-
-    std::atomic<float>* voiceMode;
-    std::atomic<float>* unisonVoices;
-    std::atomic<float>* unisonDetune;
-    std::atomic<float>* unisonWidth;
-    std::atomic<float>* glide;
-    std::atomic<float>* bendRange;
-    std::atomic<float>* vibrato;
-
-    std::atomic<float>* chorusMode;
-    std::atomic<float>* chorusMix;
-    std::atomic<float>* delaySync;
-    std::atomic<float>* delayTime;
-    std::atomic<float>* delayFeedback;
-    std::atomic<float>* delayMix;
-    std::atomic<float>* delayTape;
-    std::atomic<float>* reverbSize;
-    std::atomic<float>* reverbMix;
-
-    std::atomic<float>* masterGain;
+    Ref chorusMode, chorusMix, delaySync, delayTime, delayFeedback, delayMix, delayTape, reverbSize, reverbMix;
+    Ref masterGain;
 };
 
 } // namespace sonder

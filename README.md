@@ -2,7 +2,7 @@
 
 # 〰 SONDER
 
-**Аналоговый полифонический синтезатор с живым, «дышащим» характером**
+**A polyphonic synthesizer with an analog soul and wavetable muscle**
 
 VST3 · Standalone · Windows · C++20 · JUCE 9
 
@@ -12,66 +12,67 @@ VST3 · Standalone · Windows · C++20 · JUCE 9
 
 ---
 
-Цифровой синтезатор звучит одинаково при каждом нажатии. Аналоговый — никогда. Осцилляторы медленно уплывают из строя, детали на голосовых платах отличаются друг от друга, блок питания проседает под плотным аккордом, а холодный инструмент строит ниже, пока не прогреется.
+A digital synth sounds exactly the same every time you press a key. An analog one never does. Oscillators slowly wander out of tune, parts on the voice cards differ from each other, the power supply sags under a dense chord, and a cold instrument plays flat until it warms up.
 
-**Sonder** моделирует именно эти несовершенства — и позволяет управлять ими ручками.
+**Sonder** models these imperfections and puts them on knobs. It pairs them with modern sound-design tools: wavetable oscillators, a formant filter, drawable LFOs and drag-and-drop modulation.
 
-## Аналоговый характер
+## Analog character
 
-| Ручка | Что делает |
+| Knob | What it does |
 |---|---|
-| **Drift** | Медленное случайное «плавание» высоты и среза фильтра. У каждого осциллятора свой независимый дрейф, поэтому биения между ними постоянно меняются |
-| **Jitter** | Быстрое дрожание высоты тона: звук перестаёт быть стерильным |
-| **Spread** | Разброс деталей между голосовыми платами: у каждого голоса свой строй, срез, скорость огибающих, громкость и место в панораме |
-| **Sag** | Просадка блока питания: громкие аккорды тянут строй вниз и слегка сжимают громкость |
-| **Warm-up** | Холодный старт: после загрузки инструмент строит ниже и сильнее плывёт, а за минуту «прогревается» |
-| **Unit** | 16 «экземпляров железа» — у каждого свой постоянный набор допусков, как у двух синтезаторов одной модели |
+| **Drift** | Slow random wander of pitch and filter cutoff. Each oscillator drifts on its own, so the beating between them keeps changing |
+| **Jitter** | Fast pitch instability that takes the sterile edge off the sound |
+| **Spread** | Component tolerances between voice cards: each voice has its own tuning, cutoff, envelope speed, level and stereo position |
+| **Sag** | Power supply sag: loud chords pull the pitch down and slightly compress the level |
+| **Warm-up** | Cold start: right after loading, the instrument plays flat and drifts more, then settles within about a minute |
+| **Unit** | 16 "hardware units", each with its own fixed set of tolerances, like two synths of the same model |
 
-А ещё: осцилляторы работают всегда и не сбрасывают фазу на новой ноте, огибающие ведут себя как RC-цепочки (выпуклая атака, повторная нота стартует с текущего уровня), голоса назначаются по кругу, как на Juno и Prophet.
+On top of that, the oscillators are free-running and never reset phase on a new note, the envelopes behave like RC circuits, and voices are assigned round-robin, as on a Juno or a Prophet.
 
-## Возможности
+## Sound
 
-**Осцилляторы**
-- Два VCO: пила, пульс, треугольник, синус — без алиасинга (PolyBLEP, двукратная передискретизация)
-- Суб-осциллятор, шум, частотная (FM) и кольцевая модуляция
-- Вейвфолдер для плотных, «металлических» гармоник
+**Oscillators**
+- Two oscillators: alias-free saw, pulse, triangle and sine (PolyBLEP), or **wavetable**
+- Morph through the frames of a table with the **WT Pos** knob. LFOs and envelopes can drive it too
+- Built-in tables: Basic Shapes, PWM, Harmonic Sweep, **Vocal**, FM Growl, Sync, Fold
+- **Your own wavetables**: Serum-format WAVs (2048-sample frames), single cycles and arbitrary files
+- Sub oscillator, noise, FM, ring modulation, wavefolder
+- Up to 4 unison layers with detune and stereo width
 
-**Фильтр**
-- Ladder-фильтр в духе Moog на ZDF-звеньях с нелинейностью в петле обратной связи
-- Режимы LP 24 / LP 12 / Band / High
-- Резонанс до самовозбуждения; драйв насыщает и «съедает» резонанс — как у оригинала
+**Filter**
+- Moog-style ladder: LP 24 / LP 12 / Band / High. Resonance goes all the way to self-oscillation, and drive "eats" the resonance just like the original
+- **Vowel**: a formant filter for "a-e-i-o-u". The Vowel knob picks the vowel and Cutoff shifts the formants. Made for talking and growling basses
 
-**Модуляция**
-- Две огибающие ADSR с живым графиком формы
-- Два LFO: 7 форм, синхронизация с темпом DAW (от 1/32 до 4/1, триоли и с точкой)
-- Мод-матрица на 6 слотов: 9 источников × 14 целей
-- Колесо модуляции, aftertouch, pitch bend, сустейн-педаль
+**Distortion** after the filter: Tube, Hard, Fold and Crush, with Drive, Mix and Tone controls
 
-**Голоса**
-- 16 голосов, режимы Poly / Mono / Legato
-- Unison до 4 слоёв с расстройкой и стерео-шириной
-- Глайд с экспоненциальной кривой, как у аналогового портаменто
+**Effects** on their own page: Juno-60-style chorus, tape ping-pong delay with wow and flutter, reverb
 
-**Эффекты**
-- Хорус в стиле Juno-60 (режимы I, II, I+II) с тёмным BBD-оттенком
-- Ленточный пинг-понг дилей: смена времени «тянет» высоту, ручка Tape добавляет детонацию и насыщение
-- Реверб
+## Modulation
 
-**Интерфейс**
-- Осциллограф со стабильной синхронизацией по периоду ноты
-- Индикаторы активных голосов
-- Масштабируемое окно
-- Экранная клавиатура в standalone-версии
+- **8 LFOs**: open more tabs with the "+" button. Free / Retrig / Env modes and host tempo sync
+- **Serum-style LFO shape editor**: drag points, double-click to add or remove a point, drag the handle in the middle of a segment to bend it. Hold Shift to snap to the grid; right-click for preset shapes
+- **Drag and drop**: grab an LFO tab or the ✥ icon on an envelope and drop it on any highlighted knob. The connection is created for you
+- **Modulation rings** on knobs show the modulation range, and a white dot shows the live value
+- **Alt+drag** on a knob changes modulation depth; right-click opens the connection menu (invert, remove)
+- **Mod matrix** with 32 slots: 15 sources (LFOs, envelopes, velocity, mod wheel, aftertouch, key, random) and 27 destinations, including the LFO rates themselves
 
-## Пресеты
+## Visuals
 
-23 заводских пресета в категориях **Bass**, **Lead**, **Pad**, **Keys**, **Pluck** и **FX** встроены прямо в плагин. DAW видит их как программы.
+- Oscilloscope that locks to the period of the playing note
+- Oscillator display: a 3D stack of wavetable frames with the live position highlighted
+- Filter frequency response that moves with cutoff and vowel modulation
+- Envelope graphs, LFO shape and phase, voice activity LEDs
+- Resizable window; on-screen keyboard in the standalone version
 
-Свои пресеты сохраняются кнопкой **SAVE** в `%APPDATA%\Sonder\Presets` — это обычные XML-файлы `.sonderpreset`, ими легко поделиться.
+## Presets
 
-## Сборка
+27 factory presets in the **Bass**, **Lead**, **Pad**, **Keys**, **Pluck** and **FX** categories are built into the plugin, and your DAW sees them as programs. Try **Vocal Growl**, **Talking Lead** and **Glass Table**.
 
-Нужны Visual Studio 2022 (с компонентом «Разработка классических приложений на C++») и Git.
+The **SAVE** button stores your own presets in `%APPDATA%\Sonder\Presets` as `.sonderpreset` XML files, together with drawn LFO shapes and wavetable choices. Your wavetables live in `%APPDATA%\Sonder\Wavetables`: load a WAV from the oscillator menu or just drop files into that folder.
+
+## Building
+
+You need Visual Studio 2022 (with the "Desktop development with C++" workload) and Git.
 
 ```bat
 git clone --recurse-submodules <url> Sonder
@@ -79,33 +80,41 @@ cd Sonder
 generate.bat
 ```
 
-`generate.bat` создаёт `build\Sonder.sln` через CMake (подходит и тот, что входит в Visual Studio). Откройте решение и соберите: стартовый проект — `Sonder_Standalone`, его можно запускать без DAW.
+`generate.bat` creates `build\Sonder.sln` with CMake (the copy bundled with Visual Studio works too). Open the solution and build. The startup project is `Sonder_Standalone`, which runs without a DAW.
 
-Результаты сборки:
-
-| Формат | Путь |
+| Format | Path |
 |---|---|
 | VST3 | `build\Sonder_artefacts\<Config>\VST3\Sonder.vst3` |
 | Standalone | `build\Sonder_artefacts\<Config>\Standalone\Sonder.exe` |
 
-Чтобы DAW нашла плагин, скопируйте `Sonder.vst3` в `C:\Program Files\Common Files\VST3`.
+To let your DAW find the plugin, copy `Sonder.vst3` to `C:\Program Files\Common Files\VST3`.
 
-## Устройство проекта
+## Project layout
 
 ```
 Source/
-├── dsp/          осцилляторы, ladder-фильтр, огибающие, LFO, генераторы дрейфа
-├── synth/        голос, менеджер голосов, снимок параметров
-├── fx/           хорус и ленточный дилей
-├── presets/      заводские пресеты и менеджер пресетов
-├── ui/           оформление, ручки, осциллограф, графики, панель пресетов
-├── Parameters    все параметры плагина
-└── Plugin*       процессор и окно плагина
-external/JUCE     JUCE как git-сабмодуль
+├── dsp/          oscillators, wavetables, ladder and formant filters, distortion, envelopes, LFOs
+├── synth/        voice, voice manager, modulation routing
+├── fx/           chorus and tape delay
+├── presets/      factory presets and preset manager
+├── ui/           look and feel, knobs, LFO editor, oscillator and filter displays, oscilloscope
+├── Parameters    all plugin parameters
+└── Plugin*       processor and editor
+external/JUCE     JUCE as a git submodule
 ```
 
-Синтез идёт на удвоенной частоте дискретизации, эффекты — на обычной. Параметры читаются один раз за блок в снимок `SynthParams`, в аудиопотоке нет выделений памяти и блокировок.
+Synthesis runs at twice the sample rate; effects run at the normal rate. LFOs are computed per voice, so their rates can be modulated too. Wavetables are stored with mip levels, so high notes don't alias.
 
-## Лицензия
+## License
 
-Sonder построен на [JUCE](https://juce.com), который распространяется под AGPLv3 или коммерческой лицензией. Перед распространением плагина проверьте условия лицензии JUCE.
+Sonder is built with [JUCE](https://juce.com) and uses it under the [JUCE 9 Starter licence](https://juce.com/legal/juce-9-licence/).
+
+VST is a registered trademark of Steinberg Media Technologies GmbH.
+
+---
+
+<div align="center">
+
+**Sonder is completely free.** No price, no trial, no registration: download it, make music and share it.
+
+</div>

@@ -14,7 +14,7 @@ namespace
 SonderAudioProcessor::SonderAudioProcessor()
     : AudioProcessor (BusesProperties().withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       parameters (*this, nullptr, "Parameters", sonder::createParameterLayout()),
-      presetManager (parameters),
+      presetManager (parameters, lfoShapes, wavetables),
       params (parameters)
 {
 }
@@ -36,14 +36,10 @@ void SonderAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock
 
     // Синтез идёт на удвоенной частоте: меньше алиасинга от нелинейностей, эффекты на обычной
     const auto factor = (int) oversampling->getOversamplingFactor();
-    const double oversampledRate = sampleRate * factor;
+    oversampledRate = sampleRate * factor;
     const int maxOversampledBlock = maxBlockSize * factor;
 
     voiceManager.prepare (oversampledRate, maxOversampledBlock);
-    lfo1.prepare (oversampledRate, 0x11f01u);
-    lfo2.prepare (oversampledRate, 0x22f02u);
-    lfo1Buffer.assign ((size_t) maxOversampledBlock, 0.0f);
-    lfo2Buffer.assign ((size_t) maxOversampledBlock, 0.0f);
     oversampledMidi.ensureSize (4096);
 
     chorus.prepare (sampleRate);
@@ -79,12 +75,6 @@ SonderAudioProcessor::Transport SonderAudioProcessor::readTransport() const
     return transport;
 }
 
-float SonderAudioProcessor::lfoRate (std::atomic<float>* rate, std::atomic<float>* sync, double bpm) const
-{
-    const double beats = sonder::syncDivisionInBeats ((int) sync->load());
-    return beats > 0.0 ? (float) (bpm / 60.0 / beats) : rate->load();
-}
-
 void SonderAudioProcessor::updateAnalogState (int numSamples)
 {
     // Прогрев: после "включения" (загрузки или поворота ручки) генераторы дрейфуют сильнее
@@ -116,21 +106,22 @@ void SonderAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
 
     keyboardState.processNextMidiBuffer (midi, 0, numSamples, true);
 
-    const auto synthParams = sonder::SynthParams::fromRefs (params);
     const auto transport = readTransport();
+    const auto synthParams = sonder::SynthParams::fromRefs (params, transport.bpm);
 
     // Синхронизированные LFO привязываем к позиции транспорта, чтобы фаза совпадала с тактом
     if (transport.isPlaying && transport.ppq.has_value())
     {
-        const auto lockPhase = [&transport] (sonder::Lfo& lfo, std::atomic<float>* sync)
+        for (int l = 0; l < sonder::kNumLfos; ++l)
         {
-            const double beats = sonder::syncDivisionInBeats ((int) sync->load());
+            const double beats = sonder::syncDivisionInBeats ((int) params.lfoSync[(size_t) l]->load());
             if (beats > 0.0)
-                lfo.setPhase ((float) std::fmod (*transport.ppq / beats, 1.0));
-        };
-
-        lockPhase (lfo1, params.lfo1Sync);
-        lockPhase (lfo2, params.lfo2Sync);
+            {
+                const double position = *transport.ppq / beats;
+                globalLfos[(size_t) l].phase = position - std::floor (position);
+                globalLfos[(size_t) l].cycle = (uint32_t) (int64_t) std::floor (position);
+            }
+        }
     }
 
     masterGain.setTargetValue (juce::Decibels::decibelsToGain (params.masterGain->load()));
@@ -143,10 +134,31 @@ void SonderAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
         renderChunk (buffer, midi, start, length, synthParams, transport);
     }
 
+    updateDisplayState (synthParams);
+}
+
+void SonderAudioProcessor::updateDisplayState (const sonder::SynthParams& synthParams)
+{
     activeVoiceMask.store (voiceManager.getActiveVoiceMask());
-    lfo1Phase.store (lfo1.getPhase());
-    lfo2Phase.store (lfo2.getPhase());
     scope.noteFrequency.store (voiceManager.getLastNoteFrequency());
+
+    const auto* voice = voiceManager.getDisplayVoice();
+
+    for (int l = 0; l < sonder::kNumLfos; ++l)
+    {
+        const bool free = synthParams.lfos[(size_t) l].mode == sonder::LfoMode::free;
+        const float phase = free || voice == nullptr ? (float) globalLfos[(size_t) l].phase : voice->getLfoPhase (l);
+        lfoDisplayPhase[(size_t) l].store (phase);
+    }
+
+    // Живая модуляция для колец на ручках
+    displayVoiceActive.store (voice != nullptr);
+    for (size_t d = 0; d < displayModulation.size(); ++d)
+        displayModulation[d].store (voice != nullptr ? voice->getDisplayModulation()[d] : 0.0f);
+
+    // 0 - нет звучащего голоса, интерфейс рисует фильтр по положению ручек
+    displayCutoff.store (voice != nullptr ? voice->getDisplayCutoff() : 0.0f);
+    displayVowel.store (voice != nullptr ? voice->getDisplayVowel() : synthParams.vowel);
 }
 
 void SonderAudioProcessor::renderChunk (juce::AudioBuffer<float>& buffer, const juce::MidiBuffer& midi,
@@ -164,21 +176,23 @@ void SonderAudioProcessor::renderChunk (juce::AudioBuffer<float>& buffer, const 
     float* left = oversampledBlock.getChannelPointer (0);
     float* right = oversampledBlock.getChannelPointer (1);
 
-    // LFO
-    const float rate1 = lfoRate (params.lfo1Rate, params.lfo1Sync, transport.bpm);
-    const float rate2 = lfoRate (params.lfo2Rate, params.lfo2Sync, transport.bpm);
-    const auto shape1 = static_cast<sonder::Lfo::Shape> ((int) params.lfo1Shape->load());
-    const auto shape2 = static_cast<sonder::Lfo::Shape> ((int) params.lfo2Shape->load());
-
-    for (int i = 0; i < numOversampled; ++i)
-    {
-        lfo1Buffer[(size_t) i] = lfo1.process (rate1, shape1);
-        lfo2Buffer[(size_t) i] = lfo2.process (rate2, shape2);
-    }
-
+    // Общие данные для голосов: таблицы, фазы Free-LFO
     auto bus = analogBus;
-    bus.lfo1 = lfo1Buffer.data();
-    bus.lfo2 = lfo2Buffer.data();
+    bus.wavetables = { wavetables.get (0), wavetables.get (1) };
+
+    for (int l = 0; l < sonder::kNumLfos; ++l)
+    {
+        auto& lfo = globalLfos[(size_t) l];
+        bus.lfoTables[(size_t) l] = lfoShapes.getTable (l);
+        bus.lfoIncrement[(size_t) l] = synthParams.lfos[(size_t) l].rateHz / (float) oversampledRate;
+        bus.lfoPhase[(size_t) l] = (float) lfo.phase;
+        bus.lfoCycle[(size_t) l] = lfo.cycle;
+
+        const double advanced = lfo.phase + (double) bus.lfoIncrement[(size_t) l] * numOversampled;
+        const double whole = std::floor (advanced);
+        lfo.phase = advanced - whole;
+        lfo.cycle += (uint32_t) whole;
+    }
 
     oversampledMidi.clear();
     for (const auto metadata : midi)
@@ -275,19 +289,28 @@ juce::AudioProcessorEditor* SonderAudioProcessor::createEditor()
 void SonderAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
     if (auto xml = parameters.copyState().createXml())
+    {
+        // Формы LFO и выбор wavetable не параметры - сохраняем рядом
+        xml->addChildElement (lfoShapes.toXml().release());
+        xml->addChildElement (wavetables.toXml().release());
         copyXmlToBinary (*xml, destData);
+    }
 }
 
 void SonderAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
-    if (auto xml = getXmlFromBinary (data, sizeInBytes))
-    {
-        if (xml->hasTagName (parameters.state.getType()))
-        {
-            parameters.replaceState (juce::ValueTree::fromXml (*xml));
-            presetManager.syncWithState();
-        }
-    }
+    auto xml = getXmlFromBinary (data, sizeInBytes);
+    if (xml == nullptr || ! xml->hasTagName (parameters.state.getType()))
+        return;
+
+    lfoShapes.fromXml (xml->getChildByName ("LfoShapes"));
+    wavetables.fromXml (xml->getChildByName ("Wavetables"));
+
+    xml->deleteAllChildElementsWithTagName ("LfoShapes");
+    xml->deleteAllChildElementsWithTagName ("Wavetables");
+
+    parameters.replaceState (juce::ValueTree::fromXml (*xml));
+    presetManager.syncWithState();
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

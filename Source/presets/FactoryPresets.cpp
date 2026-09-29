@@ -1,15 +1,17 @@
-#include "FactoryPresets.h"
+﻿#include "FactoryPresets.h"
 
 namespace sonder
 {
 
 // Индексы вариантов (см. Parameters.cpp):
-//   формы осцилляторов: 0 Saw, 1 Pulse, 2 Triangle, 3 Sine
-//   фильтр: 0 LP24, 1 LP12, 2 Band, 3 High;  режим голосов: 0 Poly, 1 Mono, 2 Legato
-//   формы LFO: 0 Sine, 1 Triangle, 2 Saw Up, 3 Saw Down, 4 Square, 5 S&H, 6 Smooth
+//   формы осцилляторов: 0 Saw, 1 Pulse, 2 Triangle, 3 Sine, 4 Wavetable
+//   фильтр: 0 LP24, 1 LP12, 2 Band, 3 High, 4 Vowel;  режим голосов: 0 Poly, 1 Mono, 2 Legato
+//   дисторшн: 0 Off, 1 Tube, 2 Hard, 3 Fold, 4 Crush
+//   формы LFO: 0 Sine, 1 Triangle, 2 Saw Up, 3 Saw Down, 4 Square, 5 S&H, 6 Smooth;  режимы LFO: 0 Free, 1 Retrig, 2 Env
 //   синхронизация: 0 Free, 3 1/16, 6 1/8, 8 1/8., 9 1/4, 11 1/4., 12 1/2, 13 1/1
 //   источники: 1 LFO1, 2 LFO2, 3 FEnv, 4 AEnv, 5 Vel, 6 MW, 7 AT, 8 Key, 9 Random
-//   цели: 1 Pitch, 2 Osc1, 3 Osc2, 4 PW, 5 Mix, 6 FM, 7 Fold, 8 Sub, 9 Noise, 10 Cutoff, 11 Reso, 12 Drive, 13 Amp, 14 Pan
+//   цели: 1 Pitch, 2 Osc1, 3 Osc2, 4 PW, 5 Mix, 6 FM, 7 Fold, 8 Sub, 9 Noise, 10 Cutoff, 11 Reso, 12 Drive, 13 Amp, 14 Pan,
+//         15 Vowel, 16 Dist Drive, 17 Dist Mix, 18 Osc1 WT Pos, 19 Osc2 WT Pos, 20..27 LFO 1..8 Rate
 //   хорус: 0 Off, 1 I, 2 II, 3 I+II
 
 const std::vector<FactoryPreset>& getFactoryPresets()
@@ -56,6 +58,24 @@ const std::vector<FactoryPreset>& getFactoryPresets()
             { "mod1Source", 3 }, { "mod1Dest", 7 }, { "mod1Amount", 0.4f },
             { "mod2Source", 1 }, { "mod2Dest", 7 }, { "mod2Amount", 0.2f } } },
 
+        { "Vocal Growl", "Bass", {
+            { "voiceMode", 1 }, { "glide", 0.03f }, { "unisonVoices", 2 }, { "unisonDetune", 0.15f }, { "unisonWidth", 0.15f },
+            { "osc1Shape", 4 }, { "osc1WtPos", 0.4f }, { "osc2Fine", 7 }, { "oscMix", 0.35f }, { "subLevel", 0.4f },
+            { "foldAmount", 0.2f },
+            { "filterMode", 4 }, { "cutoff", 1000 }, { "resonance", 0.55f }, { "drive", 0.7f }, { "vowel", 0.45f },
+            { "filterEnvAmt", 0 },
+            { "distType", 1 }, { "distDrive", 0.6f }, { "distTone", 0.75f },
+            { "ampAttack", 0.003f }, { "ampSustain", 1 }, { "ampRelease", 0.1f },
+            { "lfo1Shape", 1 }, { "lfo1Sync", 6 }, { "lfo1Mode", 1 },
+            { "lfo2Shape", 0 }, { "lfo2Rate", 22 },
+            { "mod1Source", 1 }, { "mod1Dest", 15 }, { "mod1Amount", 0.45f },
+            { "mod2Source", 1 }, { "mod2Dest", 18 }, { "mod2Amount", 0.35f },
+            { "mod3Source", 2 }, { "mod3Dest", 10 }, { "mod3Amount", 0.06f },
+            { "mod4Source", 2 }, { "mod4Dest", 16 }, { "mod4Amount", 0.15f },
+            { "mod5Source", 6 }, { "mod5Dest", 20 }, { "mod5Amount", 0.5f },
+            { "mod6Source", 5 }, { "mod6Dest", 16 }, { "mod6Amount", 0.2f },
+            { "masterGain", -6 } }, "Vocal" },
+
         // ---------------------------------------------------------------- Lead
         { "Detuned Lead", "Lead", {
             { "voiceMode", 2 }, { "osc2Fine", 12 }, { "unisonVoices", 3 }, { "unisonDetune", 0.35f }, { "unisonWidth", 0.5f },
@@ -92,6 +112,16 @@ const std::vector<FactoryPreset>& getFactoryPresets()
             { "filterAttack", 0.08f }, { "filterDecay", 0.6f }, { "filterSustain", 0.45f }, { "filterRelease", 0.3f },
             { "ampAttack", 0.05f }, { "ampDecay", 0.5f }, { "ampSustain", 0.85f }, { "ampRelease", 0.3f },
             { "chorusMode", 1 }, { "chorusMix", 0.4f }, { "reverbMix", 0.15f } , { "masterGain", -11 } } },
+
+        { "Talking Lead", "Lead", {
+            { "voiceMode", 2 }, { "glide", 0.06f }, { "osc2Shape", 1 }, { "osc2Fine", 10 },
+            { "filterMode", 4 }, { "cutoff", 1200 }, { "resonance", 0.6f }, { "drive", 0.5f }, { "vowel", 0.5f },
+            { "distType", 1 }, { "distDrive", 0.3f },
+            { "ampSustain", 1 }, { "ampRelease", 0.2f }, { "vibrato", 0.5f },
+            { "lfo1Shape", 6 }, { "lfo1Sync", 6 }, { "lfo1Mode", 1 },
+            { "mod1Source", 1 }, { "mod1Dest", 15 }, { "mod1Amount", 0.5f },
+            { "mod2Source", 6 }, { "mod2Dest", 10 }, { "mod2Amount", 0.3f },
+            { "delaySync", 8 }, { "delayMix", 0.2f }, { "reverbMix", 0.15f } } },
 
         // ---------------------------------------------------------------- Pad
         { "Juno Strings", "Pad", {
@@ -132,6 +162,17 @@ const std::vector<FactoryPreset>& getFactoryPresets()
             { "drift", 0.6f }, { "chorusMode", 1 }, { "chorusMix", 0.6f },
             { "delaySync", 13 }, { "delayFeedback", 0.6f }, { "delayMix", 0.25f }, { "reverbSize", 0.95f }, { "reverbMix", 0.6f } } },
 
+        { "Glass Table", "Pad", {
+            { "osc1Shape", 4 }, { "osc1WtPos", 0.15f }, { "osc2Shape", 4 }, { "osc2WtPos", 0.6f }, { "osc2Fine", 9 },
+            { "cutoff", 3500 }, { "resonance", 0.15f }, { "filterEnvAmt", 0.1f },
+            { "ampAttack", 0.8f }, { "ampSustain", 1 }, { "ampRelease", 2.5f },
+            { "unisonVoices", 2 }, { "unisonDetune", 0.2f }, { "unisonWidth", 0.9f },
+            { "lfo1Shape", 1 }, { "lfo1Rate", 0.07f }, { "lfo2Shape", 6 }, { "lfo2Rate", 0.2f },
+            { "mod1Source", 1 }, { "mod1Dest", 18 }, { "mod1Amount", 0.35f },
+            { "mod2Source", 2 }, { "mod2Dest", 19 }, { "mod2Amount", 0.3f },
+            { "chorusMode", 1 }, { "chorusMix", 0.5f }, { "reverbSize", 0.85f }, { "reverbMix", 0.4f },
+            { "delaySync", 11 }, { "delayMix", 0.15f }, { "masterGain", -11 } }, "Harmonic Sweep", "Vocal" },
+
         // ---------------------------------------------------------------- Keys
         { "FM Bell", "Keys", {
             { "osc1Shape", 3 }, { "osc2Shape", 3 }, { "osc2Semi", 17 }, { "osc2Fine", 0 }, { "oscMix", 0 },
@@ -160,6 +201,14 @@ const std::vector<FactoryPreset>& getFactoryPresets()
             { "osc2Shape", 1 }, { "filterMode", 3 }, { "cutoff", 400 }, { "resonance", 0.3f }, { "filterEnvAmt", 0.2f },
             { "ampDecay", 0.8f }, { "ampSustain", 0.5f },
             { "chorusMode", 2 }, { "chorusMix", 0.7f }, { "delaySync", 9 }, { "delayMix", 0.2f } , { "masterGain", -3 } } },
+
+        { "Crushed Keys", "Keys", {
+            { "osc1Shape", 4 }, { "osc1WtPos", 0.5f }, { "oscMix", 0.25f }, { "cutoff", 2500 }, { "resonance", 0.2f },
+            { "filterEnvAmt", 0.3f }, { "filterDecay", 0.5f }, { "filterSustain", 0.1f },
+            { "distType", 4 }, { "distDrive", 0.55f }, { "distMix", 0.7f }, { "distTone", 0.6f },
+            { "ampDecay", 0.9f }, { "ampSustain", 0.3f }, { "ampRelease", 0.4f },
+            { "mod1Source", 5 }, { "mod1Dest", 16 }, { "mod1Amount", 0.3f },
+            { "chorusMode", 2 }, { "chorusMix", 0.5f }, { "delaySync", 9 }, { "delayMix", 0.15f }, { "masterGain", -4 } }, "PWM" },
 
         // ---------------------------------------------------------------- Pluck
         { "Glass Pluck", "Pluck", {

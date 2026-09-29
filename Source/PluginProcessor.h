@@ -2,7 +2,8 @@
 
 #include "Parameters.h"
 #include "ScopeBuffer.h"
-#include "dsp/Lfo.h"
+#include "dsp/LfoShapes.h"
+#include "dsp/WavetableBank.h"
 #include "fx/Chorus.h"
 #include "fx/TapeDelay.h"
 #include "presets/PresetManager.h"
@@ -43,13 +44,18 @@ public:
     void setStateInformation (const void* data, int sizeInBytes) override;
 
     juce::AudioProcessorValueTreeState parameters;
+    sonder::LfoShapeBank lfoShapes;
+    sonder::WavetableBank wavetables;
     sonder::PresetManager presetManager;
     juce::MidiKeyboardState keyboardState;
     sonder::ScopeBuffer scope;
 
-    // Для интерфейса: какие голоса звучат и где сейчас фазы LFO
+    // Для интерфейса: какие голоса звучат, фазы LFO, текущий срез фильтра
     std::atomic<uint32_t> activeVoiceMask { 0 };
-    std::atomic<float> lfo1Phase { 0.0f }, lfo2Phase { 0.0f };
+    std::array<std::atomic<float>, sonder::kNumLfos> lfoDisplayPhase {};
+    std::atomic<float> displayCutoff { 0.0f }, displayVowel { 0.0f };
+    std::array<std::atomic<float>, (size_t) sonder::ModDest::count> displayModulation {};
+    std::atomic<bool> displayVoiceActive { false };
 
 private:
     static constexpr int kOversamplingOrder = 1; // 2^1 = 2x
@@ -61,16 +67,21 @@ private:
         bool isPlaying = false;
     };
 
+    struct GlobalLfo
+    {
+        double phase = 0.0;
+        uint32_t cycle = 0;
+    };
+
     Transport readTransport() const;
     void renderChunk (juce::AudioBuffer<float>& buffer, const juce::MidiBuffer& midi, int startSample, int numSamples,
                       const sonder::SynthParams& synthParams, const Transport& transport);
     void updateAnalogState (int numSamples);
-    float lfoRate (std::atomic<float>* rate, std::atomic<float>* sync, double bpm) const;
+    void updateDisplayState (const sonder::SynthParams& synthParams);
 
     sonder::ParameterRefs params;
     sonder::VoiceManager voiceManager;
-    sonder::Lfo lfo1, lfo2;
-    std::vector<float> lfo1Buffer, lfo2Buffer;
+    std::array<GlobalLfo, sonder::kNumLfos> globalLfos {};
 
     sonder::Chorus chorus;
     sonder::TapeDelay delay;
@@ -79,7 +90,7 @@ private:
     std::unique_ptr<juce::dsp::Oversampling<float>> oversampling;
     juce::MidiBuffer oversampledMidi;
     juce::SmoothedValue<float> masterGain;
-    double currentSampleRate = 44100.0;
+    double currentSampleRate = 44100.0, oversampledRate = 88200.0;
     int maxBlockSize = 0;
 
     // Просадка питания: огибающая громкости, прогрев: время с "включения"
