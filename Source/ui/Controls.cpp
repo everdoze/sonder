@@ -4,6 +4,7 @@
 #include "Parameters.h"
 #include "synth/SynthParams.h"
 #include "SonderLookAndFeel.h"
+#include "Theme.h"
 #include "dsp/Saturation.h"
 
 namespace sonder::ui
@@ -55,6 +56,8 @@ public:
 
     void mouseDown (const juce::MouseEvent& e) override
     {
+        owner.endMorph(); // рука на ручке важнее анимации
+
         if (! owner.handleMouseDown (e))
             juce::Slider::mouseDown (e);
     }
@@ -83,6 +86,60 @@ namespace
     {
         const auto text = description.toString();
         return text.startsWith (dragPrefix) ? text.fromFirstOccurrenceOf (dragPrefix, false, false).getIntValue() : -1;
+    }
+
+    void setModParameter (Apvts& state, const juce::String& id, float value)
+    {
+        if (auto* target = state.getParameter (id))
+        {
+            target->beginChangeGesture();
+            target->setValueNotifyingHost (target->convertTo0to1 (value));
+            target->endChangeGesture();
+        }
+    }
+}
+
+int addModulationSlot (Apvts& state, ModSource source, ModDest dest)
+{
+    if (source == ModSource::off || dest == ModDest::off)
+        return -1;
+
+    int freeSlot = -1;
+
+    for (int slot = 0; slot < kNumModSlots; ++slot)
+    {
+        const int slotSource = (int) state.getRawParameterValue (ParamIDs::modSource (slot))->load();
+        const int slotDest = (int) state.getRawParameterValue (ParamIDs::modDest (slot))->load();
+
+        // Такая связь уже есть
+        if (slotSource == (int) source && slotDest == (int) dest)
+            return slot;
+
+        if (freeSlot < 0 && slotSource == 0 && slotDest == 0)
+            freeSlot = slot;
+    }
+
+    if (freeSlot < 0)
+        return -1;
+
+    setModParameter (state, ParamIDs::modSource (freeSlot), (float) (int) source);
+    setModParameter (state, ParamIDs::modDest (freeSlot), (float) (int) dest);
+    setModParameter (state, ParamIDs::modAmount (freeSlot), 0.25f);
+    setModParameter (state, ParamIDs::modPolarity (freeSlot), (float) (int) ModPolarity::both);
+    return freeSlot;
+}
+
+void clearModulationSlot (Apvts& state, int slot)
+{
+    for (const auto& id : { ParamIDs::modSource (slot), ParamIDs::modDest (slot), ParamIDs::modAmount (slot),
+                            ParamIDs::modPolarity (slot) })
+    {
+        if (auto* parameter = state.getParameter (id))
+        {
+            parameter->beginChangeGesture();
+            parameter->setValueNotifyingHost (parameter->getDefaultValue());
+            parameter->endChangeGesture();
+        }
     }
 }
 
@@ -136,7 +193,7 @@ ParameterControl::ParameterControl (SonderAudioProcessor& p, const juce::String&
 
     if (destination != ModDest::off)
     {
-        slider->setTooltip ("Drag an LFO or envelope here to modulate.\nAlt+drag: modulation depth, right-click: modulation menu");
+        slider->setTooltip ("Drag an LFO or envelope here to modulate.\nAlt+drag: depth, Alt+click: next modulator, right-click: menu");
         startTimerHz (30);
     }
 }
@@ -173,10 +230,27 @@ void ParameterControl::resized()
     }
 }
 
+void ParameterControl::setBipolar (bool bipolar)
+{
+    if (slider != nullptr)
+        slider->getProperties().set ("bipolar", bipolar);
+}
+
+void ParameterControl::setDefaultValue (double value)
+{
+    if (slider != nullptr)
+        slider->setDoubleClickReturnValue (true, value);
+}
+
+void ParameterControl::setLabelScale (float minimumHorizontalScale)
+{
+    label.setMinimumHorizontalScale (minimumHorizontalScale);
+}
+
 void ParameterControl::setTooltipText (const juce::String& text)
 {
     if (slider != nullptr)
-        slider->setTooltip (destination != ModDest::off ? text + "\n\nAlt+drag: modulation depth, right-click: modulation menu" : text);
+        slider->setTooltip (destination != ModDest::off ? text + "\n\nAlt+drag: depth, Alt+click: next modulator, right-click: menu" : text);
 
     if (comboBox != nullptr)
         comboBox->setTooltip (text);
@@ -184,16 +258,21 @@ void ParameterControl::setTooltipText (const juce::String& text)
 
 void ParameterControl::paintOverChildren (juce::Graphics& g)
 {
-    // Во время Alt+drag вместо значения показываем глубину модуляции
+    // Пока редактируется модуляция: вместо подписи - номер модулятора, вместо значения - источник и глубина
     if (amountOverlay.isEmpty() || slider == nullptr)
         return;
 
-    const auto area = juce::Rectangle<int> (0, getHeight() - 18, getWidth(), 16).toFloat();
-    g.setColour (Palette::deep);
-    g.fillRoundedRectangle (area.reduced (2.0f, 0.0f), 3.0f);
-    g.setColour (Palette::accentBright);
-    g.setFont (makeFont (11.0f, true));
-    g.drawText (amountOverlay, area, juce::Justification::centred);
+    const auto drawBadge = [&g] (juce::Rectangle<int> area, const juce::String& text, juce::Colour colour, float fontSize)
+    {
+        g.setColour (Palette::deep);
+        g.fillRoundedRectangle (area.toFloat().reduced (1.0f, 0.0f), 3.0f);
+        g.setColour (colour);
+        g.setFont (makeFont (fontSize, true));
+        g.drawFittedText (text, area, juce::Justification::centred, 1, 0.7f);
+    };
+
+    drawBadge ({ 0, 0, getWidth(), 16 }, overlayCaption, Palette::accent, 10.5f);
+    drawBadge ({ 0, getHeight() - 18, getWidth(), 16 }, amountOverlay, Palette::accentBright, 11.0f);
 }
 
 //==============================================================================
@@ -232,8 +311,20 @@ juce::String ParameterControl::describeSlot (int slot) const
     auto& state = processor.parameters;
     const int source = (int) state.getRawParameterValue (ParamIDs::modSource (slot))->load();
     const float amount = state.getRawParameterValue (ParamIDs::modAmount (slot))->load();
+    const int polarity = (int) state.getRawParameterValue (ParamIDs::modPolarity (slot))->load();
     const int percent = juce::roundToInt (amount * 100.0f);
-    return Choices::modSources()[source] + "  " + (percent > 0 ? "+" : "") + juce::String (percent) + "%";
+    static const char* directions[] { "both ways", "up", "down" };
+    return Choices::modSources()[source] + "  " + (percent > 0 ? "+" : "") + juce::String (percent) + "%, "
+         + directions[juce::jlimit (0, 2, polarity)];
+}
+
+std::pair<float, float> ParameterControl::slotSpan (int slot) const
+{
+    auto& state = processor.parameters;
+    const auto source = static_cast<ModSource> ((int) state.getRawParameterValue (ParamIDs::modSource (slot))->load());
+    const auto polarity = static_cast<ModPolarity> (juce::jlimit (0, 2, (int) state.getRawParameterValue (ParamIDs::modPolarity (slot))->load()));
+    const float amount = state.getRawParameterValue (ParamIDs::modAmount (slot))->load();
+    return modulationSpan (source, polarity, amount);
 }
 
 void ParameterControl::setParameterValue (const juce::String& id, float value)
@@ -251,32 +342,9 @@ void ParameterControl::addModulation (int sourceIndex)
     if (destination == ModDest::off || sourceIndex <= 0)
         return;
 
-    auto& state = processor.parameters;
-    int freeSlot = -1;
-
-    for (int slot = 0; slot < kNumModSlots; ++slot)
-    {
-        const int source = (int) state.getRawParameterValue (ParamIDs::modSource (slot))->load();
-        const int dest = (int) state.getRawParameterValue (ParamIDs::modDest (slot))->load();
-
-        // Такая связь уже есть - просто делаем её активной
-        if (source == sourceIndex && dest == (int) destination)
-        {
-            activeSlot = slot;
-            return;
-        }
-
-        if (freeSlot < 0 && source == 0 && dest == 0)
-            freeSlot = slot;
-    }
-
-    if (freeSlot < 0)
-        return;
-
-    setParameterValue (ParamIDs::modSource (freeSlot), (float) sourceIndex);
-    setParameterValue (ParamIDs::modDest (freeSlot), (float) (int) destination);
-    setParameterValue (ParamIDs::modAmount (freeSlot), 0.25f);
-    activeSlot = freeSlot;
+    // Такая связь уже есть - просто делаем её активной
+    if (const int slot = addModulationSlot (processor.parameters, static_cast<ModSource> (sourceIndex), destination); slot >= 0)
+        activeSlot = slot;
 }
 
 void ParameterControl::showModulationMenu()
@@ -290,8 +358,15 @@ void ParameterControl::showModulationMenu()
 
     for (int slot : slots)
     {
+        const int polarity = (int) processor.parameters.getRawParameterValue (ParamIDs::modPolarity (slot))->load();
+
         juce::PopupMenu sub;
         sub.addItem (1000 + slot, "Edit with Alt+drag", true, slot == activeSlot);
+        sub.addSectionHeader ("DIRECTION");
+        sub.addItem (4000 + slot * 4 + (int) ModPolarity::both, "Both ways from the knob", true, polarity == (int) ModPolarity::both);
+        sub.addItem (4000 + slot * 4 + (int) ModPolarity::up, "Up only (adds)", true, polarity == (int) ModPolarity::up);
+        sub.addItem (4000 + slot * 4 + (int) ModPolarity::down, "Down only (subtracts)", true, polarity == (int) ModPolarity::down);
+        sub.addSeparator();
         sub.addItem (2000 + slot, "Invert");
         sub.addItem (3000 + slot, "Remove");
         menu.addSubMenu (describeSlot (slot), sub);
@@ -312,12 +387,20 @@ void ParameterControl::showModulationMenu()
         auto& control = *safeThis;
         const auto clear = [&control] (int slot)
         {
-            for (const auto& id : { ParamIDs::modSource (slot), ParamIDs::modDest (slot), ParamIDs::modAmount (slot) })
+            for (const auto& id : { ParamIDs::modSource (slot), ParamIDs::modDest (slot), ParamIDs::modAmount (slot),
+                                    ParamIDs::modPolarity (slot) })
                 if (auto* target = control.processor.parameters.getParameter (id))
                     target->setValueNotifyingHost (target->getDefaultValue());
         };
 
-        if (result == 9000)
+        if (result >= 4000 && result < 9000)
+        {
+            const int slot = (result - 4000) / 4;
+            control.setParameterValue (ParamIDs::modPolarity (slot), (float) ((result - 4000) % 4));
+            control.activeSlot = slot;
+            control.showOverlay (slot, 1500);
+        }
+        else if (result == 9000)
         {
             for (int slot : slots)
                 clear (slot);
@@ -335,6 +418,7 @@ void ParameterControl::showModulationMenu()
         else if (result >= 1000)
         {
             control.activeSlot = result - 1000;
+            control.showOverlay (control.activeSlot, 1500);
         }
     });
 }
@@ -358,14 +442,14 @@ bool ParameterControl::handleMouseDown (const juce::MouseEvent& e)
         return false;
 
     draggingAmount = true;
+    dragMoved = false;
     dragStartAmount = processor.parameters.getRawParameterValue (ParamIDs::modAmount (slot))->load();
     dragStartY = e.position.y;
 
     if (auto* amount = processor.parameters.getParameter (ParamIDs::modAmount (slot)))
         amount->beginChangeGesture();
 
-    amountOverlay = describeSlot (slot);
-    repaint();
+    showOverlay (slot, 0);
     return true;
 }
 
@@ -374,6 +458,12 @@ bool ParameterControl::handleMouseDrag (const juce::MouseEvent& e)
     if (! draggingAmount)
         return false;
 
+    // Пока мышь почти не сдвинулась, это ещё может оказаться Alt+клик (смена модулятора)
+    if (! dragMoved && e.getDistanceFromDragStart() < 3)
+        return true;
+
+    dragMoved = true;
+
     // Вверх - больше, Shift - точная подстройка
     const float sensitivity = e.mods.isShiftDown() ? 600.0f : 150.0f;
     const float amount = juce::jlimit (-1.0f, 1.0f, dragStartAmount + (dragStartY - e.position.y) / sensitivity);
@@ -381,8 +471,7 @@ bool ParameterControl::handleMouseDrag (const juce::MouseEvent& e)
     if (auto* target = processor.parameters.getParameter (ParamIDs::modAmount (activeSlot)))
         target->setValueNotifyingHost (target->convertTo0to1 (amount));
 
-    amountOverlay = describeSlot (activeSlot);
-    repaint();
+    showOverlay (activeSlot, 0);
     return true;
 }
 
@@ -395,12 +484,108 @@ bool ParameterControl::handleMouseUp (const juce::MouseEvent&)
         amount->endChangeGesture();
 
     draggingAmount = false;
-    amountOverlay.clear();
-    repaint();
+
+    // Alt+клик без перетаскивания: переходим к следующему модулятору этой ручки
+    if (! dragMoved)
+    {
+        const auto slots = modulationSlots();
+        const auto it = std::find (slots.begin(), slots.end(), activeSlot);
+        if (it != slots.end() && slots.size() > 1)
+            activeSlot = slots[(size_t) ((it - slots.begin() + 1) % (std::ptrdiff_t) slots.size())];
+    }
+
+    // Подпись ещё немного висит, чтобы было видно, какой модулятор выбран
+    showOverlay (activeSlot, 1500);
     return true;
 }
 
+void ParameterControl::showOverlay (int slot, int holdMilliseconds)
+{
+    // Ячейка узкая, поэтому имя источника сокращаем, а номер модулятора пишем вместо подписи ручки
+    static const char* shortNames[] { "Off", "LFO 1", "LFO 2", "F.Env", "A.Env", "Vel", "M.Whl", "A.Tch", "Key", "Rnd",
+                                      "LFO 3", "LFO 4", "LFO 5", "LFO 6", "LFO 7", "LFO 8", "Slide" };
+    static const char* directions[] { "", " up", " down" };
+
+    auto& state = processor.parameters;
+    const int source = juce::jlimit (0, (int) std::size (shortNames) - 1,
+                                     (int) state.getRawParameterValue (ParamIDs::modSource (slot))->load());
+    const int percent = juce::roundToInt (state.getRawParameterValue (ParamIDs::modAmount (slot))->load() * 100.0f);
+    const int polarity = juce::jlimit (0, 2, (int) state.getRawParameterValue (ParamIDs::modPolarity (slot))->load());
+    amountOverlay = juce::String (shortNames[source]) + " " + (percent > 0 ? "+" : "") + juce::String (percent) + "%"
+                  + directions[polarity];
+
+    const auto slots = modulationSlots();
+    const auto position = std::find (slots.begin(), slots.end(), slot) - slots.begin() + 1;
+    overlayCaption = slots.size() > 1 ? "MOD " + juce::String ((int) position) + "/" + juce::String ((int) slots.size())
+                                      : juce::String ("MOD");
+
+    overlayExpiry = holdMilliseconds > 0 ? juce::Time::getMillisecondCounter() + (juce::uint32) holdMilliseconds : 0;
+    updateModulationRing();
+    repaint();
+}
+
 void ParameterControl::timerCallback()
+{
+    updateMorph();
+
+    if (destination != ModDest::off)
+        updateModulationRing();
+}
+
+void ParameterControl::beginMorph()
+{
+    if (slider == nullptr || ! isVisible())
+        return;
+
+    // Если прошлая анимация ещё идёт, продолжаем с того места, где ручка нарисована сейчас
+    auto& sliderProperties = slider->getProperties();
+    const float shown = sliderProperties.getWithDefault ("animPos", -1.0f);
+
+    morphFrom = morphing && shown >= 0.0f ? shown : (float) slider->valueToProportionOfLength (slider->getValue());
+    morphStart = juce::Time::getMillisecondCounter();
+    morphing = true;
+    sliderProperties.set ("animPos", morphFrom);
+    startTimerHz (60);
+}
+
+void ParameterControl::updateMorph()
+{
+    if (! morphing)
+        return;
+
+    constexpr float duration = 380.0f; // мс
+    const float t = (float) (juce::Time::getMillisecondCounter() - morphStart) / duration;
+
+    if (t >= 1.0f)
+    {
+        endMorph();
+        return;
+    }
+
+    // Быстро трогается и мягко останавливается
+    const float eased = 1.0f - (1.0f - t) * (1.0f - t) * (1.0f - t);
+    const float target = (float) slider->valueToProportionOfLength (slider->getValue());
+    slider->getProperties().set ("animPos", morphFrom + (target - morphFrom) * eased);
+    slider->repaint();
+}
+
+void ParameterControl::endMorph()
+{
+    if (! morphing)
+        return;
+
+    morphing = false;
+    slider->getProperties().remove ("animPos");
+    slider->repaint();
+
+    // Таймер нужен дальше только ручкам с кольцом модуляции
+    if (destination != ModDest::off)
+        startTimerHz (30);
+    else
+        stopTimer();
+}
+
+void ParameterControl::updateModulationRing()
 {
     if (slider == nullptr || parameter == nullptr)
         return;
@@ -411,42 +596,59 @@ void ParameterControl::timerCallback()
 
     for (int slot : modulationSlots())
     {
-        const auto source = static_cast<ModSource> ((int) state.getRawParameterValue (ParamIDs::modSource (slot))->load());
-        const float amount = state.getRawParameterValue (ParamIDs::modAmount (slot))->load();
-        if (amount == 0.0f)
+        if (state.getRawParameterValue (ParamIDs::modAmount (slot))->load() == 0.0f)
             continue;
 
         active = true;
-        if (isBipolarSource (source))
-        {
-            low -= std::abs (amount);
-            high += std::abs (amount);
-        }
-        else
-        {
-            low += juce::jmin (0.0f, amount);
-            high += juce::jmax (0.0f, amount);
-        }
+        const auto [spanLow, spanHigh] = slotSpan (slot);
+        low += spanLow;
+        high += spanHigh;
     }
 
     const auto& range = parameter->getNormalisableRange();
     const float base = parameter->convertFrom0to1 (parameter->getValue());
     const auto normalised = [&] (float modulation)
     {
-        const float value = juce::jlimit (range.start, range.end, applyModulation (destination, base, modulation));
+        const float value = juce::jlimit (range.start, range.end, applyModulation (destination, base, modulation, range));
         return range.convertTo0to1 (value);
     };
 
     auto& sliderProperties = slider->getProperties();
     const float modMin = active ? normalised (low) : 0.0f;
     const float modMax = active ? normalised (high) : 0.0f;
-    const bool live = active && processor.displayVoiceActive.load();
+
+    // Общие цели (рэк, Master) живут и без звучащего голоса: их LFO идёт всегда
+    const bool live = active && (isGlobalDest (destination) || processor.displayVoiceActive.load());
     const float modLive = live ? normalised (processor.displayModulation[(size_t) destination].load()) : -1.0f;
+
+    // Подпись редактирования гаснет сама через заданное время
+    if (! draggingAmount && amountOverlay.isNotEmpty() && overlayExpiry != 0
+        && juce::Time::getMillisecondCounter() > overlayExpiry)
+    {
+        amountOverlay.clear();
+        overlayCaption.clear();
+        repaint();
+    }
+
+    // Диапазон редактируемого модулятора отдельной дугой: видно, какой из нескольких сейчас выбран
+    const auto slots = modulationSlots();
+    const bool editing = amountOverlay.isNotEmpty() && std::find (slots.begin(), slots.end(), activeSlot) != slots.end();
+    float editMin = 0.0f, editMax = 0.0f;
+
+    if (editing)
+    {
+        const auto [spanLow, spanHigh] = slotSpan (activeSlot);
+        editMin = normalised (spanLow);
+        editMax = normalised (spanHigh);
+    }
 
     const bool changed = (bool) sliderProperties.getWithDefault ("modActive", false) != active
                       || (float) sliderProperties.getWithDefault ("modMin", 0.0f) != modMin
                       || (float) sliderProperties.getWithDefault ("modMax", 0.0f) != modMax
-                      || (float) sliderProperties.getWithDefault ("modLive", -1.0f) != modLive;
+                      || (float) sliderProperties.getWithDefault ("modLive", -1.0f) != modLive
+                      || (bool) sliderProperties.getWithDefault ("modEdit", false) != editing
+                      || (float) sliderProperties.getWithDefault ("modEditMin", 0.0f) != editMin
+                      || (float) sliderProperties.getWithDefault ("modEditMax", 0.0f) != editMax;
 
     if (changed)
     {
@@ -454,6 +656,9 @@ void ParameterControl::timerCallback()
         sliderProperties.set ("modMin", modMin);
         sliderProperties.set ("modMax", modMax);
         sliderProperties.set ("modLive", modLive);
+        sliderProperties.set ("modEdit", editing);
+        sliderProperties.set ("modEditMin", editMin);
+        sliderProperties.set ("modEditMax", editMax);
         slider->repaint();
     }
 }
@@ -480,7 +685,7 @@ void ParameterControl::itemDropped (const SourceDetails& details)
 {
     slider->getProperties().set ("dropTarget", false);
     addModulation (sourceFromDescription (details.description));
-    timerCallback();
+    updateModulationRing();
 }
 
 //==============================================================================
@@ -529,30 +734,92 @@ void ModSourceHandle::mouseDrag (const juce::MouseEvent& e)
         startModulationDrag (*this, sourceProvider());
 }
 
+int ModSourceHandle::sourceFromDrag (const juce::var& description)
+{
+    return sourceFromDescription (description);
+}
+
+//==============================================================================
+ModSourceChip::ModSourceChip (ModSource modSource, const juce::String& label)
+    : source (modSource), text (label)
+{
+    setMouseCursor (juce::MouseCursor::DraggingHandCursor);
+    setTooltip ("Drag onto a knob to modulate it with " + Choices::modSources()[(int) modSource]);
+}
+
+void ModSourceChip::paint (juce::Graphics& g)
+{
+    const auto bounds = getLocalBounds().toFloat().reduced (0.5f);
+    const bool over = isMouseOver();
+
+    g.setColour (over ? Palette::accent.withAlpha (0.25f) : Palette::deep);
+    g.fillRoundedRectangle (bounds, bounds.getHeight() * 0.5f);
+    g.setColour (over ? Palette::accent : Palette::outline);
+    g.drawRoundedRectangle (bounds, bounds.getHeight() * 0.5f, 1.0f);
+
+    g.setColour (over ? Palette::accentBright : Palette::textDim);
+    g.setFont (makeFont (10.0f, true, 0.08f));
+    g.drawFittedText (text, getLocalBounds().reduced (4, 0), juce::Justification::centred, 1, 0.8f);
+}
+
+void ModSourceChip::mouseDrag (const juce::MouseEvent& e)
+{
+    if (e.getDistanceFromDragStart() > 3)
+        ModSourceHandle::startModulationDrag (*this, source);
+}
+
 void ModSourceHandle::startModulationDrag (juce::Component& source, ModSource modSource)
 {
     auto* container = juce::DragAndDropContainer::findParentDragContainerFor (&source);
     if (container == nullptr || container->isDragAndDropActive())
         return;
 
-    // Картинка-"пилюля" с именем источника
-    const auto name = Choices::modSources()[(int) modSource];
-    const auto font = makeFont (13.0f, true);
-    const int width = juce::roundToInt (juce::GlyphArrangement::getStringWidth (font, name)) + 22;
-    juce::Image image (juce::Image::ARGB, width, 24, true);
-    {
-        juce::Graphics g (image);
-        const auto bounds = image.getBounds().toFloat().reduced (1.0f);
-        g.setColour (Palette::deep.withAlpha (0.92f));
-        g.fillRoundedRectangle (bounds, 11.0f);
-        g.setColour (Palette::accent);
-        g.drawRoundedRectangle (bounds, 11.0f, 1.5f);
-        g.setColour (Palette::accentBright);
-        g.setFont (font);
-        g.drawText (name, bounds, juce::Justification::centred);
-    }
+    container->startDragging (dragPrefix + juce::String ((int) modSource), &source,
+                              makeDragImage (Choices::modSources()[(int) modSource]));
+}
 
-    container->startDragging (dragPrefix + juce::String ((int) modSource), &source, juce::ScaledImage (image));
+juce::ScaledImage makeDragImage (const juce::String& text)
+{
+    const auto font = makeFont (13.0f, true);
+    const int width = juce::roundToInt (juce::GlyphArrangement::getStringWidth (font, text)) + 22;
+    juce::Image image (juce::Image::ARGB, width, 24, true);
+
+    juce::Graphics g (image);
+    const auto bounds = image.getBounds().toFloat().reduced (1.0f);
+    g.setColour (Palette::deep.withAlpha (0.92f));
+    g.fillRoundedRectangle (bounds, 11.0f);
+    g.setColour (Palette::accent);
+    g.drawRoundedRectangle (bounds, 11.0f, 1.5f);
+    g.setColour (Palette::accentBright);
+    g.setFont (font);
+    g.drawText (text, bounds, juce::Justification::centred);
+
+    return juce::ScaledImage (image);
+}
+
+//==============================================================================
+DragGrip::DragGrip()
+{
+    setMouseCursor (juce::MouseCursor::DraggingHandCursor);
+}
+
+void DragGrip::paint (juce::Graphics& g)
+{
+    // Шесть точек: привычный значок "можно тащить"
+    const auto bounds = getLocalBounds().toFloat();
+    g.setColour (isMouseOver() ? Palette::accentBright : Palette::textFaint);
+
+    for (int column = 0; column < 3; ++column)
+        for (int row = 0; row < 2; ++row)
+            g.fillEllipse (juce::Rectangle<float> (2.6f, 2.6f)
+                               .withCentre ({ bounds.getCentreX() + (float) (column - 1) * 5.0f,
+                                              bounds.getCentreY() + ((float) row - 0.5f) * 5.0f }));
+}
+
+void DragGrip::mouseDrag (const juce::MouseEvent& e)
+{
+    if (e.getDistanceFromDragStart() > 3 && onDragStart != nullptr)
+        onDragStart (*this);
 }
 
 //==============================================================================
@@ -596,36 +863,152 @@ namespace
         box.addSectionHeading ("Envelopes");
         addItems (box, names, { (int) S::filterEnv, (int) S::ampEnv });
         box.addSectionHeading ("Performance");
-        addItems (box, names, { (int) S::velocity, (int) S::modWheel, (int) S::aftertouch, (int) S::key, (int) S::random });
+        addItems (box, names, { (int) S::velocity, (int) S::modWheel, (int) S::aftertouch, (int) S::slide, (int) S::key,
+                                (int) S::random });
     }
 
-    void fillDestinations (juce::ComboBox& box)
+    void addRange (juce::ComboBox& box, const juce::StringArray& names, ModDest first, ModDest last)
+    {
+        for (int d = (int) first; d <= (int) last; ++d)
+            box.addItem (names[d], d + 1);
+    }
+
+    void fillDestinations (juce::ComboBox& box, const FxRack& rack, const LfoShapeBank& lfoShapes, Apvts& state, int selected)
     {
         const auto& names = Choices::modDestinations();
         using D = ModDest;
         box.addItem (names[0], 1);
         box.addSectionHeading ("Pitch");
-        addItems (box, names, { (int) D::pitch, (int) D::osc1Pitch, (int) D::osc2Pitch });
+        addItems (box, names, { (int) D::pitch, (int) D::osc1Pitch, (int) D::osc2Pitch, (int) D::osc3Pitch, (int) D::osc4Pitch });
         box.addSectionHeading ("Oscillators");
-        addItems (box, names, { (int) D::osc1WtPos, (int) D::osc2WtPos, (int) D::pulseWidth, (int) D::oscMix,
-                                (int) D::fm, (int) D::fold, (int) D::sub, (int) D::noise });
-        box.addSectionHeading ("Filter");
-        addItems (box, names, { (int) D::cutoff, (int) D::resonance, (int) D::drive, (int) D::vowel });
+        addItems (box, names, { (int) D::osc1WtPos, (int) D::osc2WtPos, (int) D::osc3WtPos, (int) D::osc4WtPos,
+                                (int) D::pulseWidth, (int) D::fm, (int) D::fold });
+        addRange (box, names, D::osc1Fine, D::osc4Fine);
+        box.addSectionHeading ("Mixer");
+        addItems (box, names, { (int) D::osc1Level, (int) D::osc2Level, (int) D::osc3Level, (int) D::osc4Level,
+                                (int) D::sub, (int) D::noise, (int) D::noiseColor, (int) D::ring });
+        box.addSectionHeading ("Filter 1");
+        addItems (box, names, { (int) D::cutoff, (int) D::resonance, (int) D::drive, (int) D::vowel,
+                                (int) D::filter1EnvAmount, (int) D::filter1KeyTrack, (int) D::filter1Velocity });
+        box.addSectionHeading ("Filter 2");
+        addItems (box, names, { (int) D::filter2Cutoff, (int) D::filter2Resonance, (int) D::filter2Drive, (int) D::filter2Vowel,
+                                (int) D::filter2EnvAmount, (int) D::filter2KeyTrack, (int) D::filter2Velocity });
         box.addSectionHeading ("Distortion");
-        addItems (box, names, { (int) D::distDrive, (int) D::distMix });
+        addItems (box, names, { (int) D::distDrive, (int) D::distMix, (int) D::distTone });
+        box.addSectionHeading ("Envelopes");
+        addRange (box, names, D::filterEnvAttack, D::filterEnvRelease);
+        addRange (box, names, D::ampAttack, D::ampVelocity);
         box.addSectionHeading ("Amp");
         addItems (box, names, { (int) D::amp, (int) D::pan });
+        box.addSectionHeading ("Voice");
+        addRange (box, names, D::unisonDetune, D::vibrato);
+        box.addSectionHeading ("Analog");
+        addRange (box, names, D::drift, D::spread);
+        addItems (box, names, { (int) D::sag, (int) D::warmup });
         box.addSectionHeading ("LFO Rate");
         for (int lfo = 0; lfo < kNumLfos; ++lfo)
             addItems (box, names, { (int) rateDestForLfo (lfo) });
+        box.addSectionHeading ("Output");
+        addItems (box, names, { (int) D::master });
+
+        // Ручки рэка: подменю на каждый занятый слот, пункты подписаны по эффекту в слоте
+        box.addSectionHeading ("Effects rack");
+        bool selectedListed = false;
+
+        for (int slot = 0; slot < kNumFxSlots; ++slot)
+        {
+            const auto type = rack.getType (slot);
+            if (type == FxType::none)
+                continue;
+
+            const auto& info = getFxTypeInfo (type);
+            juce::PopupMenu sub;
+
+            for (int param = 0; param < (int) info.params.size(); ++param)
+            {
+                if (info.params[(size_t) param].isChoice())
+                    continue;
+
+                const int id = (int) fxDest (slot, param) + 1;
+                sub.addItem (id, "FX " + juce::String (slot + 1) + " " + info.name + " " + info.params[(size_t) param].label);
+                selectedListed |= id == selected;
+            }
+
+            box.getRootMenu()->addSubMenu ("Slot " + juce::String (slot + 1) + ": " + info.name, sub);
+        }
+
+        // Точки пользовательских форм LFO: подменю на каждый LFO
+        box.addSectionHeading ("LFO shape points");
+
+        for (int lfo = 0; lfo < kNumLfos; ++lfo)
+        {
+            if ((int) state.getRawParameterValue (ParamIDs::lfoShape (lfo))->load() != (int) LfoShape::custom)
+                continue;
+
+            juce::PopupMenu sub;
+            const int points = juce::jmin (kMaxModulatedPoints, (int) lfoShapes.getPoints (lfo).size());
+
+            for (int point = 0; point < points; ++point)
+                for (bool position : { false, true })
+                {
+                    const int id = (int) lfoPointDest (lfo, point, position) + 1;
+                    sub.addItem (id, "LFO " + juce::String (lfo + 1) + " Point " + juce::String (point + 1)
+                                         + (position ? " time" : " height"));
+                    selectedListed |= id == selected;
+                }
+
+            box.getRootMenu()->addSubMenu ("LFO " + juce::String (lfo + 1), sub);
+        }
+
+        // Выбранная цель, которой сейчас нет в списке (эффект убран, точка удалена, форма не своя):
+        // пункт нужен, чтобы список показал её имя
+        if (selected - 1 >= (int) D::fxFirst && ! selectedListed)
+            box.addItem (names[selected - 1] + " (inactive)", selected);
     }
 }
 
-ModSlotView::ModSlotView (Apvts& s, int slotIndex)
-    : state (s), slot (slotIndex)
+void PolarityButton::drawArrows (juce::Graphics& g, juce::Rectangle<float> area, ModPolarity polarity, juce::Colour colour)
+{
+    const auto centre = area.getCentre();
+    const float half = juce::jmin (area.getWidth(), area.getHeight()) * 0.38f;
+    const float head = half * 0.55f;
+
+    juce::Path arrows;
+    const auto arrow = [&] (float direction) // -1 вверх, +1 вниз
+    {
+        const float tip = centre.y + direction * half;
+        arrows.startNewSubPath (centre.x, centre.y);
+        arrows.lineTo (centre.x, tip);
+        arrows.startNewSubPath (centre.x - head, tip - direction * head);
+        arrows.lineTo (centre.x, tip);
+        arrows.lineTo (centre.x + head, tip - direction * head);
+    };
+
+    if (polarity != ModPolarity::down)
+        arrow (-1.0f);
+    if (polarity != ModPolarity::up)
+        arrow (1.0f);
+
+    g.setColour (colour);
+    g.strokePath (arrows, { 1.6f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded });
+}
+
+void PolarityButton::paintButton (juce::Graphics& g, bool highlighted, bool down)
+{
+    const auto bounds = getLocalBounds().toFloat().reduced (0.5f);
+    g.setColour (down ? Palette::accentDim.withAlpha (0.5f) : Palette::deep);
+    g.fillRoundedRectangle (bounds, 4.0f);
+    g.setColour (highlighted ? Palette::accent : Palette::outline);
+    g.drawRoundedRectangle (bounds, 4.0f, 1.0f);
+    drawArrows (g, bounds.reduced (3.0f), polarity, isEnabled() ? Palette::accentBright : Palette::textFaint);
+}
+
+//==============================================================================
+ModSlotView::ModSlotView (Apvts& s, const FxRack& fxRack, const LfoShapeBank& shapes, int slotIndex)
+    : state (s), rack (fxRack), lfoShapes (shapes), slot (slotIndex)
 {
     fillSources (source);
-    fillDestinations (destination);
+    fillDestinationList();
 
     amount.setSliderStyle (juce::Slider::LinearHorizontal);
     amount.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
@@ -634,8 +1017,16 @@ ModSlotView::ModSlotView (Apvts& s, int slotIndex)
     clearButton.setTooltip ("Clear this slot");
     clearButton.onClick = [this] { clear(); };
 
+    polarityButton.setTooltip ("Direction of the modulation from the knob position: both ways, up only or down only. Click to change");
+    polarityButton.onClick = [this]
+    {
+        const int current = (int) state.getRawParameterValue (ParamIDs::modPolarity (slot))->load();
+        polarityAttachment->setValueAsCompleteGesture ((float) ((current + 1) % 3));
+    };
+
     addAndMakeVisible (source);
     addAndMakeVisible (destination);
+    addAndMakeVisible (polarityButton);
     addAndMakeVisible (amount);
     addAndMakeVisible (clearButton);
 
@@ -649,7 +1040,49 @@ ModSlotView::ModSlotView (Apvts& s, int slotIndex)
     destinationAttachment = std::make_unique<GroupedChoiceAttachment> (parameter (ParamIDs::modDest (slot)), destination,
                                                                        [this] { updateActiveState(); });
     amountAttachment = std::make_unique<Apvts::SliderAttachment> (state, ParamIDs::modAmount (slot), amount);
+    polarityAttachment = std::make_unique<juce::ParameterAttachment> (parameter (ParamIDs::modPolarity (slot)), [this] (float value)
+    {
+        polarityButton.setPolarity (static_cast<ModPolarity> (juce::jlimit (0, 2, juce::roundToInt (value))));
+    });
+    polarityAttachment->sendInitialUpdate();
+
+    signature = targetsSignature();
     updateActiveState();
+    startTimerHz (4);
+}
+
+juce::String ModSlotView::targetsSignature() const
+{
+    // Список целей зависит от эффектов в рэке и от точек пользовательских форм LFO
+    juce::String result (rack.getVersion());
+    for (int lfo = 0; lfo < kNumLfos; ++lfo)
+    {
+        const bool custom = (int) state.getRawParameterValue (ParamIDs::lfoShape (lfo))->load() == (int) LfoShape::custom;
+        result << "," << (custom ? (int) lfoShapes.getPoints (lfo).size() : 0);
+    }
+    return result;
+}
+
+void ModSlotView::fillDestinationList()
+{
+    const int selected = juce::roundToInt (state.getRawParameterValue (ParamIDs::modDest (slot))->load()) + 1;
+    destination.clear (juce::dontSendNotification);
+    fillDestinations (destination, rack, lfoShapes, state, selected);
+    destination.setSelectedId (selected, juce::dontSendNotification);
+}
+
+void ModSlotView::timerCallback()
+{
+    // В рэке сменились эффекты или у LFO сменилось число точек: список целей устарел.
+    // Выбранная цель вне списка тоже требует пересборки, чтобы показать её имя.
+    const auto current = targetsSignature();
+    const int selected = juce::roundToInt (state.getRawParameterValue (ParamIDs::modDest (slot))->load()) + 1;
+
+    if (current != signature || destination.getSelectedId() != selected)
+    {
+        signature = current;
+        fillDestinationList();
+    }
 }
 
 bool ModSlotView::isInUse() const
@@ -659,7 +1092,8 @@ bool ModSlotView::isInUse() const
 
 void ModSlotView::clear()
 {
-    for (const auto& id : { ParamIDs::modSource (slot), ParamIDs::modDest (slot), ParamIDs::modAmount (slot) })
+    for (const auto& id : { ParamIDs::modSource (slot), ParamIDs::modDest (slot), ParamIDs::modAmount (slot),
+                            ParamIDs::modPolarity (slot) })
     {
         if (auto* parameter = state.getParameter (id))
         {
@@ -674,6 +1108,7 @@ void ModSlotView::updateActiveState()
 {
     const bool active = source.getSelectedId() > 1 && destination.getSelectedId() > 1;
     amount.setAlpha (active ? 1.0f : 0.4f);
+    polarityButton.setAlpha (active ? 1.0f : 0.4f);
     clearButton.setAlpha (isInUse() ? 1.0f : 0.3f);
     repaint();
 }
@@ -708,7 +1143,9 @@ void ModSlotView::resized()
     source.setBounds (area.removeFromLeft (comboWidth).withSizeKeepingCentre (comboWidth, 26));
     area.removeFromLeft (16);
     destination.setBounds (area.removeFromLeft (comboWidth).withSizeKeepingCentre (comboWidth, 26));
-    area.removeFromLeft (10);
+    area.removeFromLeft (8);
+    polarityButton.setBounds (area.removeFromLeft (24).withSizeKeepingCentre (24, 24));
+    area.removeFromLeft (8);
     amount.setBounds (area.withSizeKeepingCentre (area.getWidth(), 28));
 }
 
@@ -732,11 +1169,41 @@ void EnvelopeView::timerCallback()
         lastValues[i] = value;
     }
 
-    if (changed)
+    // Экран меняется только вместе с ручками, поэтому и шейдеры считаются только тогда
+    const bool shaders = shader.isAvailable() && Visuals::wantsShaders (*this);
+    const int look = (shaders ? 2 : 0) + (Settings::get().crtScreen ? 1 : 0);
+
+    if (changed || look != lastLook)
+    {
+        lastLook = look;
+
+        if (shaders)
+        {
+            auto fx = Visuals::staticScreenFx (false);
+            fx.cornerRadius = 5.0f;
+            shader.render (*this, fx, [this] (juce::Graphics& g) { paintScreen (g, true); }, true);
+        }
+        else
+        {
+            shader.invalidate();
+        }
+
         repaint();
+    }
 }
 
 void EnvelopeView::paint (juce::Graphics& g)
+{
+    const auto bounds = getLocalBounds().toFloat().reduced (1.0f);
+
+    if (! shader.draw (g, getLocalBounds().toFloat()))
+        paintScreen (g, false);
+
+    g.setColour (Palette::outline.withAlpha (0.8f));
+    g.drawRoundedRectangle (bounds.reduced (0.5f), 5.0f, 1.0f);
+}
+
+void EnvelopeView::paintScreen (juce::Graphics& g, bool forShader)
 {
     const auto bounds = getLocalBounds().toFloat().reduced (1.0f);
     fillDisplayBackground (g, bounds);
@@ -785,24 +1252,37 @@ void EnvelopeView::paint (juce::Graphics& g)
     g.setColour (Palette::accentBright);
     for (auto point : { peak, decayEnd, releaseStart })
         g.fillEllipse (juce::Rectangle<float> (5.0f, 5.0f).withCentre (point));
+
+    if (! forShader)
+        glass.draw (g, bounds, 5.0f);
 }
 
 //==============================================================================
-VoiceLeds::VoiceLeds (const std::atomic<uint32_t>& voiceMask)
-    : mask (voiceMask)
+VoiceLeds::VoiceLeds (SonderAudioProcessor& p)
+    : processor (p)
 {
     startTimerHz (30);
 }
 
 void VoiceLeds::timerCallback()
 {
-    const uint32_t bits = mask.load();
+    const uint32_t active = processor.activeVoiceMask.load();
     bool changed = false;
 
     for (size_t i = 0; i < brightness.size(); ++i)
     {
-        const float target = (bits >> i) & 1u ? 1.0f : 0.0f;
-        const float next = target > brightness[i] ? target : brightness[i] * 0.8f;
+        // Яркость по уровню голоса; вспыхивает сразу, гаснет плавно
+        const float level = (active >> i) & 1u ? processor.displayVoiceLevel[i].load() : 0.0f;
+        const float target = level > 1.0e-4f ? juce::jlimit (0.2f, 1.0f, std::sqrt (level) * 1.3f) : 0.0f;
+        const float next = target > brightness[i] ? target : juce::jmax (target, brightness[i] * 0.8f);
+
+        if (target > 0.0f)
+        {
+            const float note = processor.displayVoicePitch[i].load();
+            changed |= std::abs (note - pitch[i]) > 0.25f;
+            pitch[i] = note;
+        }
+
         changed |= std::abs (next - brightness[i]) > 0.001f;
         brightness[i] = next < 0.01f ? 0.0f : next;
     }
@@ -820,19 +1300,25 @@ void VoiceLeds::paint (juce::Graphics& g)
     g.setFont (makeFont (9.5f, true, 0.2f));
     g.drawText ("VOICES", caption, juce::Justification::centred);
 
+    const auto base = Palette::accent.interpolatedWith (Palette::accentBright, 0.5f);
+    const bool byPitch = Settings::get().timbreColour;
+
     const float step = area.getWidth() / (float) brightness.size();
     for (size_t i = 0; i < brightness.size(); ++i)
     {
         const auto centre = juce::Point<float> (area.getX() + step * ((float) i + 0.5f), area.getCentreY());
         const float b = brightness[i];
 
+        // Две с половиной октавы вниз и вверх от до первой октавы
+        const auto colour = byPitch ? shiftColour (base, juce::jlimit (-1.0f, 1.0f, (pitch[i] - 60.0f) / 30.0f)) : Palette::accentBright;
+
         if (b > 0.0f)
         {
-            g.setColour (Palette::accent.withAlpha (0.25f * b));
+            g.setColour (colour.withAlpha (0.3f * b));
             g.fillEllipse (juce::Rectangle<float> (13.0f, 13.0f).withCentre (centre));
         }
 
-        g.setColour (Palette::track.interpolatedWith (Palette::accentBright, b));
+        g.setColour (Palette::track.interpolatedWith (colour, b));
         g.fillEllipse (juce::Rectangle<float> (6.0f, 6.0f).withCentre (centre));
     }
 }

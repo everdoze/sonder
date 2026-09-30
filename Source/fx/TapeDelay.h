@@ -1,5 +1,7 @@
 #pragma once
 
+#include "FxTypes.h"
+#include "Parameters.h"
 #include "dsp/Saturation.h"
 #include "dsp/SmoothNoise.h"
 
@@ -10,8 +12,9 @@
 namespace sonder
 {
 
-// Пинг-понг дилей с характером ленты: смена времени "тянет" высоту тона, как у тейп-эха,
-// в петле обратной связи темнеющий фильтр и насыщение, ручка Tape добавляет детонацию (wow и flutter).
+// Стерео-дилей с характером ленты: смена времени "тянет" высоту тона, как у тейп-эха,
+// в петле обратной связи фильтры и насыщение, ручка Tape добавляет детонацию (wow и flutter).
+// Width = 100% - пинг-понг, 0% - обычное моно-эхо; Offset сдвигает время правого канала.
 class TapeDelay
 {
 public:
@@ -21,35 +24,53 @@ public:
     {
         sampleRate = (float) newSampleRate;
 
+        // Запас на сдвиг правого канала (до +50%) и детонацию
         size_t size = 1;
-        while (size < (size_t) (newSampleRate * (kMaxDelaySeconds + 0.1)))
+        while (size < (size_t) (newSampleRate * (kMaxDelaySeconds * 1.5 + 0.1)))
             size <<= 1;
 
         bufferLeft.assign (size, 0.0f);
         bufferRight.assign (size, 0.0f);
         mask = (int) size - 1;
-        writeIndex = 0;
-
-        smoothedDelay = -1.0f;
-        currentMix = 0.0f;
-        wowPhase = 0.0f;
-        lowpassLeft = lowpassRight = highpassLeft = highpassRight = 0.0f;
-
         flutter.prepare (newSampleRate, 7.0f, 0x7a9e1234u, 1);
-        highpassCoef = 1.0f - std::exp (-2.0f * 3.14159265f * 70.0f / sampleRate);
+        reset();
     }
 
-    void process (float* left, float* right, int numSamples,
-                  float delaySeconds, float feedback, float mix, float tape) noexcept
+    void reset() noexcept
     {
-        const float targetDelay = std::clamp (delaySeconds * sampleRate, 1.0f, kMaxDelaySeconds * sampleRate);
+        std::fill (bufferLeft.begin(), bufferLeft.end(), 0.0f);
+        std::fill (bufferRight.begin(), bufferRight.end(), 0.0f);
+        writeIndex = 0;
+        smoothedDelay = -1.0f;
+        wowPhase = 0.0f;
+        lowpassLeft = lowpassRight = highpassLeft = highpassRight = 0.0f;
+    }
+
+    // Время задержки в секундах с учётом синхронизации с темпом
+    static float delaySeconds (const float* p, double bpm) noexcept
+    {
+        const double beats = syncDivisionInBeats (juce::roundToInt (p[fxp::delay::sync]));
+        const float seconds = beats > 0.0 ? (float) (beats * 60.0 / juce::jmax (20.0, bpm)) : p[fxp::delay::time];
+        return juce::jlimit (0.001f, kMaxDelaySeconds, seconds);
+    }
+
+    void process (float* left, float* right, int numSamples, const float* p, double bpm) noexcept
+    {
+        const float feedback = p[fxp::delay::feedback];
+        const float mix = p[fxp::delay::mix];
+        const float tape = p[fxp::delay::tape];
+        const float width = p[fxp::delay::width];
+        const float rightRatio = 1.0f + p[fxp::delay::offset];
+
+        const float targetDelay = delaySeconds (p, bpm) * sampleRate;
         if (smoothedDelay < 0.0f)
             smoothedDelay = targetDelay;
 
+        // Лента сама темнит повторы, поэтому Tape дополнительно опускает верхний срез
         const float delaySlew = 1.0f - std::exp (-1.0f / (0.25f * sampleRate));
-        const float mixCoef = 1.0f - std::exp (-1.0f / (0.02f * sampleRate));
-        const float toneHz = 12000.0f * std::exp2 (-2.0f * tape);
-        const float lowpassCoef = 1.0f - std::exp (-2.0f * 3.14159265f * toneHz / sampleRate);
+        const float highCut = p[fxp::delay::highCut] * std::exp2 (-1.5f * tape);
+        const float lowpassCoef = 1.0f - std::exp (-2.0f * 3.14159265f * std::fmin (highCut, 0.45f * sampleRate) / sampleRate);
+        const float highpassCoef = 1.0f - std::exp (-2.0f * 3.14159265f * p[fxp::delay::lowCut] / sampleRate);
 
         const float wowDepth = tape * 0.002f * sampleRate;
         const float flutterDepth = tape * 0.00015f * sampleRate;
@@ -59,13 +80,13 @@ public:
         for (int i = 0; i < numSamples; ++i)
         {
             smoothedDelay += (targetDelay - smoothedDelay) * delaySlew;
-            currentMix += (mix - currentMix) * mixCoef;
 
             const float modulation = wowDepth * (1.0f + fastSinCycles (wowPhase)) + flutterDepth * (1.0f + flutter.next());
-            const float delay = std::max (1.0f, smoothedDelay + modulation);
+            const float delayLeft = std::max (1.0f, smoothedDelay + modulation);
+            const float delayRight = std::max (1.0f, smoothedDelay * rightRatio + modulation);
 
-            const float readLeft = read (bufferLeft, delay);
-            const float readRight = read (bufferRight, delay);
+            const float readLeft = read (bufferLeft, delayLeft);
+            const float readRight = read (bufferRight, delayRight);
 
             lowpassLeft  += (readLeft - lowpassLeft) * lowpassCoef;
             lowpassRight += (readRight - lowpassRight) * lowpassCoef;
@@ -75,13 +96,17 @@ public:
             const float wetLeft = lowpassLeft - highpassLeft;
             const float wetRight = lowpassRight - highpassRight;
 
-            // Пинг-понг: вход пишется в левую линию, правая получает только повторы из левой
+            // Пинг-понг: вход пишется в левую линию, повторы перекрёстно переходят из канала в канал.
+            // При Width = 0 обе линии получают вход и собственные повторы: обычное моно-эхо.
             const float input = 0.5f * (left[i] + right[i]);
-            bufferLeft[(size_t) writeIndex]  = input + saturate (wetRight * feedback, drive);
-            bufferRight[(size_t) writeIndex] = saturate (wetLeft * feedback, drive);
+            const float feedLeft = width * wetRight + (1.0f - width) * wetLeft;
+            const float feedRight = width * wetLeft + (1.0f - width) * wetRight;
 
-            left[i]  += wetLeft * currentMix;
-            right[i] += wetRight * currentMix;
+            bufferLeft[(size_t) writeIndex]  = input + saturate (feedLeft * feedback, drive);
+            bufferRight[(size_t) writeIndex] = (1.0f - width) * input + saturate (feedRight * feedback, drive);
+
+            left[i]  += wetLeft * mix;
+            right[i] += wetRight * mix;
 
             wowPhase += wowIncrement;
             if (wowPhase >= 1.0f)
@@ -107,10 +132,10 @@ private:
     std::vector<float> bufferLeft, bufferRight;
     int mask = 0, writeIndex = 0;
     float sampleRate = 44100.0f;
-    float smoothedDelay = -1.0f, currentMix = 0.0f;
+    float smoothedDelay = -1.0f;
     float wowPhase = 0.0f;
     float lowpassLeft = 0.0f, lowpassRight = 0.0f;
-    float highpassLeft = 0.0f, highpassRight = 0.0f, highpassCoef = 0.0f;
+    float highpassLeft = 0.0f, highpassRight = 0.0f;
     SmoothNoise flutter;
 };
 

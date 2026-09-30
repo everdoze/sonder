@@ -4,9 +4,11 @@
 #include "ScopeBuffer.h"
 #include "dsp/LfoShapes.h"
 #include "dsp/WavetableBank.h"
-#include "fx/Chorus.h"
-#include "fx/TapeDelay.h"
+#include "fx/FxChain.h"
+#include "fx/FxRackController.h"
 #include "presets/PresetManager.h"
+#include "synth/Arpeggiator.h"
+#include "synth/Tuning.h"
 #include "synth/VoiceManager.h"
 
 #include <juce_audio_utils/juce_audio_utils.h>
@@ -43,19 +45,38 @@ public:
     void getStateInformation (juce::MemoryBlock& destData) override;
     void setStateInformation (const void* data, int sizeInBytes) override;
 
+    // Рэк объявлен раньше параметров: параметры слотов берут у него имена и единицы
+    sonder::FxRack fxRack;
     juce::AudioProcessorValueTreeState parameters;
     sonder::LfoShapeBank lfoShapes;
     sonder::WavetableBank wavetables;
+    sonder::FxRackController fxController;
     sonder::PresetManager presetManager;
     juce::MidiKeyboardState keyboardState;
     sonder::ScopeBuffer scope;
+    sonder::Tuning tuning;
+
+    // Шкалы ручек для модуляции "в долях хода" (цель -> шкала её ручки)
+    const sonder::DestRanges& getDestRanges() const noexcept { return destRanges; }
+    const sonder::Arpeggiator& getArpeggiator() const noexcept { return arpeggiator; }
 
     // Для интерфейса: какие голоса звучат, фазы LFO, текущий срез фильтра
     std::atomic<uint32_t> activeVoiceMask { 0 };
     std::array<std::atomic<float>, sonder::kNumLfos> lfoDisplayPhase {};
-    std::atomic<float> displayCutoff { 0.0f }, displayVowel { 0.0f };
+    std::array<std::atomic<float>, sonder::kNumFilters> displayCutoff {}, displayVowel {};
     std::array<std::atomic<float>, (size_t) sonder::ModDest::count> displayModulation {};
     std::atomic<bool> displayVoiceActive { false };
+
+    // Уровень и высота каждого голоса (индикаторы голосов), "холод" прогрева и просадка питания (0..1)
+    std::array<std::atomic<float>, sonder::VoiceManager::kMaxVoices> displayVoiceLevel {}, displayVoicePitch {};
+    std::atomic<float> displayCold { 0.0f }, displaySag { 0.0f };
+
+    // Сумма голосов до фильтра и после него (до эффектов): спектр на экране фильтра
+    sonder::SampleRing preFilterTap, postFilterTap;
+
+    // Для визуализации эффектов
+    std::atomic<float> displayBpm { 120.0f };
+    const sonder::FxChain& getFxChain() const noexcept { return fxChain; }
 
 private:
     static constexpr int kOversamplingOrder = 1; // 2^1 = 2x
@@ -74,18 +95,23 @@ private:
     };
 
     Transport readTransport() const;
+    void runArpeggiator (juce::MidiBuffer& midi, int numSamples, const Transport& transport);
+    void computeGlobalSources (int record, const sonder::ModulationBus& bus, const sonder::SynthParams& synthParams);
+    void processEffects (float* left, float* right, int numSamples, const sonder::SynthParams& synthParams,
+                         const sonder::ModulationBus& bus, const Transport& transport);
+    float globalModulated (sonder::ModDest dest, float base) const noexcept;
     void renderChunk (juce::AudioBuffer<float>& buffer, const juce::MidiBuffer& midi, int startSample, int numSamples,
                       const sonder::SynthParams& synthParams, const Transport& transport);
     void updateAnalogState (int numSamples);
     void updateDisplayState (const sonder::SynthParams& synthParams);
 
     sonder::ParameterRefs params;
+    sonder::DestRanges destRanges;
     sonder::VoiceManager voiceManager;
+    sonder::Arpeggiator arpeggiator;
     std::array<GlobalLfo, sonder::kNumLfos> globalLfos {};
 
-    sonder::Chorus chorus;
-    sonder::TapeDelay delay;
-    juce::Reverb reverb;
+    sonder::FxChain fxChain;
 
     std::unique_ptr<juce::dsp::Oversampling<float>> oversampling;
     juce::MidiBuffer oversampledMidi;
@@ -95,9 +121,20 @@ private:
 
     // Просадка питания: огибающая громкости, прогрев: время с "включения"
     float sagEnvelope = 0.0f;
+    float coldAmount = 0.0f, sagAmount = 0.0f;
+    std::vector<float> tapBuffer;
     double warmupSeconds = 0.0;
     float lastWarmupAmount = -1.0f;
     sonder::ModulationBus analogBus;
+
+    // Общие модуляции (рэк, Master, Sag, Warm-up): источники ведущего голоса по записям,
+    // последние известные источники и итог последней записи
+    std::vector<float> leaderSources;
+    std::vector<uint8_t> leaderWritten;
+    std::array<float, (size_t) sonder::ModSource::count> globalSources {};
+    std::array<float, sonder::kNumGlobalDests> globalModulation {};
+    std::array<float, sonder::kNumFxSlots * sonder::kNumFxParams> fxModulation {};
+    float masterModGain = 1.0f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SonderAudioProcessor)
 };

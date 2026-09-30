@@ -16,8 +16,12 @@ public:
     void resized() override;
 
 private:
+    // Содержимое окна создаётся заново при смене темы: так все компоненты получают новые цвета
+    void rebuildView();
+
+    SonderAudioProcessor& synth;
     sonder::ui::SonderLookAndFeel lookAndFeel;
-    sonder::ui::MainView view;
+    std::unique_ptr<sonder::ui::MainView> view;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SonderAudioProcessorEditor)
 };

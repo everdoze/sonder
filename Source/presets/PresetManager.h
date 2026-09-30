@@ -2,8 +2,11 @@
 
 #include "dsp/LfoShapes.h"
 #include "dsp/WavetableBank.h"
+#include "fx/FxRackController.h"
 
 #include <juce_audio_processors/juce_audio_processors.h>
+
+#include <map>
 
 namespace sonder
 {
@@ -22,7 +25,8 @@ public:
         juce::File file;
     };
 
-    PresetManager (juce::AudioProcessorValueTreeState& state, LfoShapeBank& lfoShapes, WavetableBank& wavetables);
+    PresetManager (juce::AudioProcessorValueTreeState& state, LfoShapeBank& lfoShapes, WavetableBank& wavetables,
+                   FxRackController& fxRack);
 
     void refresh();
 
@@ -41,6 +45,10 @@ public:
     // После восстановления состояния из проекта DAW находим пресет по сохранённому имени
     void syncWithState();
 
+    // Вызывается перед тем, как пресет поменяет параметры: интерфейс запоминает положение ручек,
+    // чтобы плавно довести их до новых значений
+    std::function<void()> onBeforeLoad;
+
     static juce::File getUserPresetDirectory();
 
 private:
@@ -50,6 +58,7 @@ private:
     juce::AudioProcessorValueTreeState& state;
     LfoShapeBank& lfoShapes;
     WavetableBank& wavetables;
+    FxRackController& fxRack;
     std::vector<Preset> presets;
     int currentIndex = 0;
 };

@@ -17,14 +17,19 @@ VoiceManager::VoiceManager()
                 rng.nextUInt();
 
             auto& t = tolerances[(size_t) u][(size_t) v];
-            t.osc1Cents     = rng.nextBipolar();
-            t.osc2Cents     = rng.nextBipolar();
+            t.oscCents[0]   = rng.nextBipolar();
+            t.oscCents[1]   = rng.nextBipolar();
             t.cutoffOctaves = rng.nextBipolar();
             t.envelopeTime  = rng.nextBipolar();
             t.pulseWidth    = rng.nextBipolar();
             t.level         = rng.nextBipolar();
             t.pan           = rng.nextBipolar();
             t.vibratoRate   = rng.nextBipolar();
+
+            // Третий и четвёртый осцилляторы появились позже: берём их в конце,
+            // чтобы у старых юнитов остальной разброс остался прежним
+            t.oscCents[2]   = rng.nextBipolar();
+            t.oscCents[3]   = rng.nextBipolar();
         }
     }
 }
@@ -96,32 +101,73 @@ void VoiceManager::renderSegment (float* left, float* right, int start, int end,
 
     const auto& unitTolerances = tolerances[(size_t) juce::jlimit (0, kNumUnits - 1, params.unit)];
 
+    // Источники для общих целей модуляции берутся у последнего взятого голоса
     for (size_t v = 0; v < voices.size(); ++v)
+    {
+        voices[v].setLeader ((int) v == lastStartedVoice);
         voices[v].render (left, right, start, end - start, params, bus, unitTolerances[v]);
+    }
 }
 
 void VoiceManager::handleMessage (const juce::MidiMessage& message, const SynthParams& params,
                                   const ModulationBus& bus, int position)
 {
+    const int channel = juce::jlimit (1, 16, message.getChannel());
+    const bool member = isMemberChannel (channel, params);
+
+    // Голоса, которые играют на этом канале (MPE)
+    const auto forChannel = [this, channel] (auto&& action)
+    {
+        for (auto& voice : voices)
+            if (voice.isActive() && voice.getChannel() == channel)
+                action (voice);
+    };
+
     if (message.isNoteOn())
     {
-        noteOn (message.getNoteNumber(), message.getFloatVelocity(), params, bus, position);
+        noteOn (message.getNoteNumber(), message.getFloatVelocity(), channel, params, bus, position);
     }
     else if (message.isNoteOff())
     {
-        noteOff (message.getNoteNumber());
+        noteOff (message.getNoteNumber(), params);
     }
     else if (message.isPitchWheel())
     {
-        pitchBendTarget = (float) (message.getPitchWheelValue() - 8192) / 8192.0f;
+        const float bend = (float) (message.getPitchWheelValue() - 8192) / 8192.0f;
+
+        if (member)
+        {
+            channelBend[(size_t) channel] = bend;
+            forChannel ([&] (Voice& voice) { voice.setNoteBend (bend * params.mpeBendRange); });
+        }
+        else
+        {
+            pitchBendTarget = bend;
+        }
     }
     else if (message.isChannelPressure())
     {
-        aftertouchTarget = (float) message.getChannelPressureValue() / 127.0f;
+        const float pressure = (float) message.getChannelPressureValue() / 127.0f;
+
+        if (member)
+        {
+            channelPressure[(size_t) channel] = pressure;
+            forChannel ([&] (Voice& voice) { voice.setPressure (pressure); });
+        }
+        else
+        {
+            aftertouchTarget = pressure;
+        }
     }
     else if (message.isAftertouch())
     {
-        aftertouchTarget = (float) message.getAfterTouchValue() / 127.0f;
+        // Полифонический афтертач: давление одной клавиши
+        const int note = message.getNoteNumber();
+        const float pressure = (float) message.getAfterTouchValue() / 127.0f;
+
+        for (auto& voice : voices)
+            if (voice.isActive() && voice.getNote() == note)
+                voice.setPressure (pressure);
     }
     else if (message.isAllSoundOff())
     {
@@ -141,6 +187,25 @@ void VoiceManager::handleMessage (const juce::MidiMessage& message, const SynthP
                 modWheelTarget = (float) value / 127.0f;
                 break;
 
+            case 74:
+            {
+                // Слайд (MPE "третье измерение"): на канале ноты - только ей, иначе всем
+                const float slide = (float) value / 127.0f;
+
+                if (member)
+                {
+                    channelSlide[(size_t) channel] = slide;
+                    forChannel ([&] (Voice& voice) { voice.setSlide (slide); });
+                }
+                else
+                {
+                    slideValue = slide;
+                    for (auto& voice : voices)
+                        voice.setSlide (slide);
+                }
+                break;
+            }
+
             case 64:
                 sustainPedal = value >= 64;
                 if (! sustainPedal)
@@ -153,20 +218,53 @@ void VoiceManager::handleMessage (const juce::MidiMessage& message, const SynthP
     }
 }
 
-void VoiceManager::noteOn (int note, float velocity, const SynthParams& params, const ModulationBus& bus, int position)
+bool VoiceManager::shouldGlide (const SynthParams& params, bool overlapping) const noexcept
 {
+    if (params.glide <= 0.0f)
+        return false;
+
+    switch (params.glideMode)
+    {
+        case GlideMode::always:    return true;
+        case GlideMode::legato:    return overlapping;
+        case GlideMode::automatic: return currentMode == VoiceMode::legato ? overlapping : true;
+    }
+
+    return true;
+}
+
+void VoiceManager::startExpression (Voice& voice, int channel, const SynthParams& params)
+{
+    voice.setChannel (channel);
+
+    if (isMemberChannel (channel, params))
+        voice.setExpression (channelBend[(size_t) channel] * params.mpeBendRange, channelPressure[(size_t) channel],
+                             channelSlide[(size_t) channel], true);
+    else
+        voice.setExpression (0.0f, 0.0f, slideValue, true);
+}
+
+void VoiceManager::noteOn (int note, float velocity, int channel, const SynthParams& params, const ModulationBus& bus, int position)
+{
+    // Связная игра: новая нота взята, пока ещё держится другая клавиша
+    bool overlapping = false;
+    for (int key = 0; key < 128 && ! overlapping; ++key)
+        overlapping = keyDown[(size_t) key] && key != note;
+
     keyDown[(size_t) note] = true;
     sustained[(size_t) note] = false;
-    lastNoteFrequency = (float) juce::MidiMessage::getMidiNoteInHertz (note);
 
-    const bool glideEnabled = params.glide > 0.0f;
+    const float pitch = pitchFor (note);
+    lastNoteFrequency = 440.0f * std::exp2 ((pitch - 69.0f) / 12.0f);
+
+    const bool glideNow = shouldGlide (params, overlapping);
     const float previousPitch = lastPitch;
-    lastPitch = (float) note;
+    lastPitch = pitch;
 
     if (currentMode == VoiceMode::poly)
     {
         const int polyphony = params.unisonVoices <= 1 ? kMaxVoices : (params.unisonVoices == 2 ? 12 : 8);
-        const float glideFrom = glideEnabled ? previousPitch : -1.0f;
+        const float glideFrom = glideNow ? previousPitch : -1.0f;
 
         // Та же нота уже звучит (например, затухает): перезапускаем её голос, а не занимаем новый
         int index = -1;
@@ -177,7 +275,17 @@ void VoiceManager::noteOn (int note, float velocity, const SynthParams& params, 
         if (index < 0)
             index = chooseVoice (polyphony);
 
-        voices[(size_t) index].start (note, velocity, glideFrom, true, params, bus, position);
+        auto& voice = voices[(size_t) index];
+
+        // Голос занят другой нотой: сначала быстрый фейд старой, потом старт новой.
+        // Повтор той же ноты фейда не требует: высота не меняется, огибающая продолжит с текущего уровня.
+        if (voice.isActive() && (voice.isStealing() || voice.getNote() != note))
+            voice.stealTo (note, pitch, velocity, glideFrom);
+        else
+            voice.start (note, pitch, velocity, glideFrom, true, params, bus, position);
+
+        startExpression (voice, channel, params);
+
         voiceOrder[(size_t) index] = ++orderCounter;
         lastStartedVoice = index;
         nextVoice = (index + 1) % polyphony;
@@ -190,15 +298,17 @@ void VoiceManager::noteOn (int note, float velocity, const SynthParams& params, 
 
     if (currentMode == VoiceMode::legato && hadHeldNotes && voice.isActive())
     {
-        voice.glideTo (note);
+        voice.glideTo (note, pitch, glideNow);
+        startExpression (voice, channel, params);
         return;
     }
 
     float glideFrom = -1.0f;
-    if (glideEnabled)
+    if (glideNow)
         glideFrom = voice.isActive() ? voice.getCurrentPitch() : previousPitch;
 
-    voice.start (note, velocity, glideFrom, true, params, bus, position);
+    voice.start (note, pitch, velocity, glideFrom, true, params, bus, position);
+    startExpression (voice, channel, params);
     lastStartedVoice = 0;
 }
 
@@ -229,7 +339,7 @@ int VoiceManager::chooseVoice (int polyphony) const
     return oldest;
 }
 
-void VoiceManager::noteOff (int note)
+void VoiceManager::noteOff (int note, const SynthParams& params)
 {
     keyDown[(size_t) note] = false;
 
@@ -257,8 +367,8 @@ void VoiceManager::noteOff (int note)
         const int previous = heldNotes[(size_t) numHeldNotes - 1];
         if (voice.getNote() != previous)
         {
-            voice.glideTo (previous);
-            lastPitch = (float) previous;
+            lastPitch = pitchFor (previous);
+            voice.glideTo (previous, lastPitch, shouldGlide (params, true));
         }
     }
     else if (sustainPedal)
@@ -309,6 +419,8 @@ void VoiceManager::allNotesOff (bool immediately)
     numHeldNotes = 0;
     keyDown.fill (false);
     sustained.fill (false);
+    channelBend.fill (0.0f);
+    channelPressure.fill (0.0f);
 }
 
 const Voice* VoiceManager::getDisplayVoice() const noexcept

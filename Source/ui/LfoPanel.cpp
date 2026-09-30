@@ -26,7 +26,13 @@ LfoPanel::LfoPanel (SonderAudioProcessor& p)
         tab.setTooltip ("LFO " + juce::String (i + 1) + ": click to edit, drag onto a knob to modulate it");
         tab.setClickingTogglesState (true);
         tab.setRadioGroupId (0x1f0);
-        tab.onClick = [this, i] { selectLfo (i); };
+        // В радиогруппе JUCE вызывает onClick и у вкладки, которую выключает.
+        // Реагируем только на включение, иначе старая вкладка снова выберет себя.
+        tab.onClick = [this, i]
+        {
+            if (tabs[(size_t) i].getToggleState())
+                selectLfo (i);
+        };
         addChildComponent (tab);
     }
 
@@ -49,26 +55,39 @@ LfoPanel::LfoPanel (SonderAudioProcessor& p)
     startTimerHz (5);
 }
 
-bool LfoPanel::isLfoUsed (int index) const
+namespace
 {
-    const auto source = (float) (int) sourceForLfo (index);
+    bool lfoUsed (SonderAudioProcessor& processor, int index)
+    {
+        const auto source = (float) (int) sourceForLfo (index);
 
-    for (int slot = 0; slot < kNumModSlots; ++slot)
-        if (processor.parameters.getRawParameterValue (ParamIDs::modSource (slot))->load() == source)
-            return true;
+        for (int slot = 0; slot < kNumModSlots; ++slot)
+            if (processor.parameters.getRawParameterValue (ParamIDs::modSource (slot))->load() == source)
+                return true;
 
-    return false;
+        return false;
+    }
 }
 
-int LfoPanel::visibleCount() const
+bool LfoPanel::isLfoUsed (int index) const
+{
+    return lfoUsed (processor, index);
+}
+
+int LfoPanel::visibleLfoCount (SonderAudioProcessor& processor)
 {
     int count = juce::jmax (2, (int) processor.parameters.state.getProperty (visibleLfosProperty, 2));
 
     for (int i = count; i < kNumLfos; ++i)
-        if (isLfoUsed (i))
+        if (lfoUsed (processor, i))
             count = i + 1;
 
     return juce::jmin (kNumLfos, count);
+}
+
+int LfoPanel::visibleCount() const
+{
+    return visibleLfoCount (processor);
 }
 
 void LfoPanel::selectLfo (int index)

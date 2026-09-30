@@ -59,13 +59,18 @@ float LfoMath::evaluate (LfoShape shape, float phase, uint32_t cycle, uint32_t s
 
 float LfoMath::evaluatePoints (const std::vector<LfoPoint>& points, float x) noexcept
 {
-    if (points.empty())
+    return evaluatePoints (points.data(), (int) points.size(), x);
+}
+
+float LfoMath::evaluatePoints (const LfoPoint* points, int count, float x) noexcept
+{
+    if (count <= 0)
         return 0.0f;
 
-    if (x <= points.front().x)
-        return points.front().y;
+    if (x <= points[0].x)
+        return points[0].y;
 
-    for (size_t i = 0; i + 1 < points.size(); ++i)
+    for (int i = 0; i + 1 < count; ++i)
     {
         const auto& a = points[i];
         const auto& b = points[i + 1];
@@ -81,7 +86,7 @@ float LfoMath::evaluatePoints (const std::vector<LfoPoint>& points, float x) noe
         }
     }
 
-    return points.back().y;
+    return points[count - 1].y;
 }
 
 std::vector<LfoPoint> LfoMath::pointsForShape (LfoShape shape)
@@ -138,6 +143,9 @@ void LfoShapeBank::setPoints (int lfo, std::vector<LfoPoint> newPoints)
     if (newPoints.size() < 2)
         return;
 
+    if (newPoints.size() > (size_t) LfoPointSet::kMaxPoints)
+        newPoints.resize ((size_t) LfoPointSet::kMaxPoints);
+
     // Концы всегда на краях цикла, точки упорядочены по x
     std::stable_sort (newPoints.begin(), newPoints.end(), [] (const LfoPoint& a, const LfoPoint& b) { return a.x < b.x; });
     newPoints.front().x = 0.0f;
@@ -172,6 +180,10 @@ void LfoShapeBank::rebuildTable (int lfo)
 
     for (int i = 0; i < kTableSize; ++i)
         table[(size_t) i] = LfoMath::evaluatePoints (current, (float) i / (float) (kTableSize - 1));
+
+    auto& set = pointSets[(size_t) lfo][(size_t) writeIndex];
+    set.count = (int) current.size();
+    std::copy (current.begin(), current.end(), set.points.begin());
 
     activeTable[(size_t) lfo].store (writeIndex, std::memory_order_release);
     ++version;

@@ -1,6 +1,7 @@
 #include "MainView.h"
 #include "PluginProcessor.h"
 #include "SonderLookAndFeel.h"
+#include "Theme.h"
 
 namespace sonder::ui
 {
@@ -15,22 +16,74 @@ namespace
     constexpr int kKeyboardHeight = 62;
     constexpr int kContentBottom = 780;
     constexpr int kFirstKey = 36, kLastKey = 96;
+    constexpr int kColdSteps = 32;
+    constexpr float kMaxColdDim = 0.3f;
+
+    // Кружок-образец цвета для пункта меню; выбранный обведён
+    std::unique_ptr<juce::Drawable> makeSwatch (juce::Colour colour, bool selected)
+    {
+        juce::Path circle;
+        circle.addEllipse (2.0f, 2.0f, 12.0f, 12.0f);
+
+        auto swatch = std::make_unique<juce::DrawablePath>();
+        swatch->setPath (circle);
+        swatch->setFill (colour);
+        swatch->setStrokeFill (selected ? Palette::text : juce::Colours::transparentBlack);
+        swatch->setStrokeThickness (selected ? 2.0f : 0.0f);
+        return swatch;
+    }
+}
+
+bool MainView::PageButton::isInterestedInDragSource (const SourceDetails& details)
+{
+    return ModSourceHandle::sourceFromDrag (details.description) > 0;
+}
+
+void MainView::PageButton::timerCallback()
+{
+    // Как настоящее нажатие: включает кнопку и открывает страницу
+    stopTimer();
+    if (! getToggleState())
+        triggerClick();
+}
+
+void MainView::ViewButton::paintButton (juce::Graphics& g, bool highlighted, bool down)
+{
+    const auto bounds = getLocalBounds().toFloat().reduced (0.5f);
+    g.setColour (down ? Palette::accentDim.withAlpha (0.5f) : Palette::deep);
+    g.fillRoundedRectangle (bounds, 4.0f);
+    g.setColour (highlighted ? Palette::accent : Palette::outline);
+    g.drawRoundedRectangle (bounds, 4.0f, 1.0f);
+
+    // Значок: круг из двух половин - акцент и его светлый вариант
+    const auto circle = juce::Rectangle<float> (14.0f, 14.0f).withCentre (bounds.getCentre());
+    juce::Path half;
+    half.addPieSegment (circle, juce::MathConstants<float>::pi * 0.25f, juce::MathConstants<float>::pi * 1.25f, 0.0f);
+
+    g.setColour (Palette::accentBright);
+    g.fillEllipse (circle);
+    g.setColour (Palette::accent);
+    g.fillPath (half);
 }
 
 MainView::MainView (SonderAudioProcessor& p, bool keyboardVisible)
     : processor (p),
       showKeyboard (keyboardVisible),
-      osc1View (p, 0),
-      osc2View (p, 1),
-      filterView (p),
-      scopeView (p.scope),
+      visuals (p),
+      oscPanel (p, visuals),
+      filterPanel (p, visuals),
+      scopeView (p.scope, visuals),
+      fxRackView (p),
       filterEnvelopeView (p.parameters, ParamIDs::filterAttack, ParamIDs::filterDecay, ParamIDs::filterSustain, ParamIDs::filterRelease),
       ampEnvelopeView (p.parameters, ParamIDs::ampAttack, ParamIDs::ampDecay, ParamIDs::ampSustain, ParamIDs::ampRelease),
       filterEnvelopeHandle ([] { return ModSource::filterEnv; }),
       ampEnvelopeHandle ([] { return ModSource::ampEnv; }),
       lfoPanel (p),
+      arpView (p),
+      expressionPanel (p),
+      tuningPanel (p),
       presetBar (p.presetManager),
-      voiceLeds (p.activeVoiceMask),
+      voiceLeds (p),
       masterControl (p, ParamIDs::masterGain, "Master", ParameterControl::Style::inline_),
       keyboard (p.keyboardState, juce::MidiKeyboardComponent::horizontalKeyboard)
 {
@@ -38,34 +91,25 @@ MainView::MainView (SonderAudioProcessor& p, bool keyboardVisible)
     panels.reserve (24);
 
     // ---------------------------------------------------------------- SYNTH
-    auto& osc1 = addPanel (synthPage, "OSC 1", { 12, 70, 250, 216 }, 3,
-                           { { osc1Shape, "Shape" }, { osc1WtPos, "WT Pos" }, { pulseWidth, "PW" } });
-    osc1.display = &osc1View;
-    osc1.displayHeight = 86;
+    // Четыре осциллятора на вкладках; панель раскладывает себя сама
+    addPanel (synthPage, "OSC", { 12, 70, 570, 216 }, 1, {});
 
-    auto& osc2 = addPanel (synthPage, "OSC 2", { 272, 70, 310, 216 }, 4,
-                           { { osc2Shape, "Shape" }, { osc2WtPos, "WT Pos" }, { osc2Semi, "Semi" }, { osc2Fine, "Fine" } });
-    osc2.display = &osc2View;
-    osc2.displayHeight = 86;
+    addPanel (synthPage, "MIXER", { 592, 70, 304, 216 }, 5,
+              { { oscLevel (0), "Osc 1" }, { oscLevel (1), "Osc 2" }, { oscLevel (2), "Osc 3" }, { oscLevel (3), "Osc 4" },
+                { subLevel, "Sub" },
+                { noiseLevel, "Noise" }, { noiseColor, "Color" }, { fmAmount, "FM" }, { ringLevel, "Ring" }, { foldAmount, "Fold" } });
 
-    addPanel (synthPage, "MIXER", { 592, 70, 232, 216 }, 3,
-              { { oscMix, "Mix" }, { subLevel, "Sub" }, { noiseLevel, "Noise" },
-                { fmAmount, "FM" }, { ringLevel, "Ring" }, { foldAmount, "Fold" } });
-
-    auto& scope = addPanel (synthPage, "SCOPE", { 834, 70, 554, 216 }, 1, {});
+    auto& scope = addPanel (synthPage, "SCOPE", { 906, 70, 482, 216 }, 1, {});
     scope.display = &scopeView;
     scope.displayHeight = 216 - kTitleHeight - 8;
 
-    auto& filter = addPanel (synthPage, "FILTER", { 12, 296, 580, 224 }, 8,
-                             { { filterMode, "Mode" }, { cutoff, "Cutoff" }, { resonance, "Reso" }, { drive, "Drive" },
-                               { vowel, "Vowel" }, { filterEnvAmt, "Env Amt" }, { keyTrack, "Key Trk" }, { velToCutoff, "Vel" } });
-    filter.display = &filterView;
-    filter.displayHeight = 94;
+    // Два фильтра на вкладках; панель раскладывает себя сама
+    addPanel (synthPage, "FILTER", { 12, 296, 580, 224 }, 1, {});
 
-    addPanel (synthPage, "DISTORTION", { 602, 296, 160, 224 }, 2,
+    addPanel (synthPage, "DISTORTION", { 602, 296, 176, 224 }, 2,
               { { distType, "Type" }, { distDrive, "Drive" }, { distMix, "Mix" }, { distTone, "Tone" } });
 
-    addPanel (synthPage, "LFO", { 772, 296, 616, 224 }, 1, {});
+    addPanel (synthPage, "LFO", { 788, 296, 600, 224 }, 1, {});
 
     auto& filterEnv = addPanel (synthPage, "FILTER ENV", { 12, 530, 360, 250 }, 4,
                                 { { filterAttack, "Attack" }, { filterDecay, "Decay" },
@@ -83,29 +127,84 @@ MainView::MainView (SonderAudioProcessor& p, bool keyboardVisible)
               { { drift, "Drift" }, { jitter, "Jitter" }, { spread, "Spread" }, { sag, "Sag" },
                 { warmup, "Warm-up" }, { unit, "Unit" } });
 
-    addPanel (synthPage, "VOICE", { 830, 660, 558, 120 }, 7,
+    addPanel (synthPage, "VOICE", { 830, 660, 558, 120 }, 9,
               { { voiceMode, "Mode" }, { unisonVoices, "Unison" }, { unisonDetune, "Detune" }, { unisonWidth, "Width" },
-                { glide, "Glide" }, { bendRange, "Bend" }, { vibrato, "Vibrato" } });
+                { glide, "Glide" }, { glideCurve, "Curve" }, { glideMode, "G.Mode" },
+                { bendRange, "Bend" }, { vibrato, "Vibrato" } });
 
     // ---------------------------------------------------------------- MOD
     addPanel (modPage, "MOD MATRIX", { 12, 70, 1376, 710 }, 1, {});
 
     // ---------------------------------------------------------------- FX
-    addPanel (fxPage, "CHORUS", { 12, 70, 440, 216 }, 2, { { chorusMode, "Mode" }, { chorusMix, "Mix" } });
-    addPanel (fxPage, "DELAY", { 462, 70, 540, 216 }, 5,
-              { { delaySync, "Sync" }, { delayTime, "Time" }, { delayFeedback, "Feedback" },
-                { delayMix, "Mix" }, { delayTape, "Tape" } });
-    addPanel (fxPage, "REVERB", { 1012, 70, 376, 216 }, 2, { { reverbSize, "Size" }, { reverbMix, "Mix" } });
+    // Рэк эффектов: пять полос видно сразу, остальные прокручиваются. Под ним осциллограф выхода.
+    addPanel (fxPage, "EFFECTS", { 12, 70, 1376, 586 }, 1, {});
 
-    auto& output = addPanel (fxPage, "OUTPUT", { 12, 296, 1376, 484 }, 1, {});
+    auto& output = addPanel (fxPage, "OUTPUT", { 12, 666, 1376, 114 }, 1, {});
     output.display = &scopeView;
-    output.displayHeight = 484 - kTitleHeight - 8;
+    output.displayHeight = 114 - kTitleHeight - 8;
+
+    // ---------------------------------------------------------------- PLAY
+    auto& arp = addPanel (playPage, "ARPEGGIATOR", { 12, 70, 1376, 330 }, 5,
+                          { { arpMode, "Mode" }, { arpOctaves, "Octaves" }, { arpRate, "Rate" }, { arpGate, "Gate" }, { arpSwing, "Swing" } });
+    arp.display = &arpView;
+    arp.displayHeight = 196;
+
+    addPanel (playPage, "EXPRESSION", { 12, 410, 680, 370 }, 1, {});
+    addPanel (playPage, "TUNING", { 702, 410, 686, 370 }, 1, {});
 
     // ---------------------------------------------------------------- остальное
-    addChildComponent (osc1View);
-    addChildComponent (osc2View);
-    addChildComponent (filterView);
+    addChildComponent (oscPanel);
+    addChildComponent (filterPanel);
+
+    // Кнопка в заголовке панели дисторшна: показывает текущее положение, клик переключает
+    distPositionButton.setTooltip ("Distortion after the filter (POST) or before it (PRE): "
+                                   "before the filter it distorts the raw oscillators and the filter smooths the result");
+    distPositionAttachment = std::make_unique<juce::ParameterAttachment> (*p.parameters.getParameter (distPosition), [this] (float value)
+    {
+        distPositionButton.setButtonText (value > 0.5f ? "PRE" : "POST");
+    });
+    distPositionButton.onClick = [this]
+    {
+        const bool pre = processor.parameters.getRawParameterValue (ParamIDs::distPosition)->load() > 0.5f;
+        distPositionAttachment->setValueAsCompleteGesture (pre ? 0.0f : 1.0f);
+    };
+    distPositionAttachment->sendInitialUpdate();
+    addChildComponent (distPositionButton);
     addChildComponent (scopeView);
+
+    addChildComponent (fxRackView);
+    addChildComponent (arpView);
+    addChildComponent (expressionPanel);
+    addChildComponent (tuningPanel);
+
+    arpOnButton.setClickingTogglesState (true);
+    arpOnButton.setTooltip ("Switch the arpeggiator on: held notes play one after another");
+    arpOnAttachment = std::make_unique<Apvts::ButtonAttachment> (p.parameters, arpOn, arpOnButton);
+    arpHoldButton.setClickingTogglesState (true);
+    arpHoldButton.setTooltip ("Hold: the chord keeps playing after the keys are released; a new chord replaces it");
+    arpHoldAttachment = std::make_unique<Apvts::ButtonAttachment> (p.parameters, arpHold, arpHoldButton);
+    mpeButton.setClickingTogglesState (true);
+    mpeButton.setTooltip ("MPE: every note on its own MIDI channel with its own pitch bend, pressure and slide");
+    mpeAttachment = std::make_unique<Apvts::ButtonAttachment> (p.parameters, mpeOn, mpeButton);
+
+    for (auto* button : { &arpOnButton, &arpHoldButton, &mpeButton })
+        addChildComponent (*button);
+
+    // Источники модуляции над рэком: LFO, огибающие, контроллеры
+    for (int lfo = 0; lfo < kNumLfos; ++lfo)
+        fxSourceChips.push_back (std::make_unique<ModSourceChip> (sourceForLfo (lfo), "LFO " + juce::String (lfo + 1)));
+
+    const std::pair<ModSource, const char*> otherSources[] {
+        { ModSource::filterEnv, "F.ENV" }, { ModSource::ampEnv, "A.ENV" }, { ModSource::velocity, "VEL" },
+        { ModSource::modWheel, "WHEEL" }, { ModSource::aftertouch, "PRESS" }, { ModSource::slide, "SLIDE" },
+        { ModSource::key, "KEY" }, { ModSource::random, "RAND" },
+    };
+
+    for (const auto& [source, name] : otherSources)
+        fxSourceChips.push_back (std::make_unique<ModSourceChip> (source, name));
+
+    for (auto& chip : fxSourceChips)
+        addChildComponent (*chip);
     addChildComponent (filterEnvelopeView);
     addChildComponent (ampEnvelopeView);
     addChildComponent (lfoPanel);
@@ -115,22 +214,45 @@ MainView::MainView (SonderAudioProcessor& p, bool keyboardVisible)
     ampEnvelopeHandle.setTooltip ("Drag onto a knob to modulate it with the amp envelope");
 
     for (int slot = 0; slot < kNumModSlots; ++slot)
-        addChildComponent (*modSlots.emplace_back (std::make_unique<ModSlotView> (p.parameters, slot)));
+        addChildComponent (*modSlots.emplace_back (std::make_unique<ModSlotView> (p.parameters, p.fxRack, p.lfoShapes, slot)));
 
-    const char* pageNames[] { "SYNTH", "MOD", "FX" };
+    const char* pageNames[] { "SYNTH", "MOD", "FX", "PLAY" };
     for (int i = 0; i < numPages; ++i)
     {
         auto& button = pageButtons[(size_t) i];
         button.setButtonText (pageNames[i]);
         button.setClickingTogglesState (true);
         button.setRadioGroupId (0x9a6e);
-        button.onClick = [this, i] { showPage (static_cast<Page> (i)); };
+        // onClick приходит и кнопке, которую радиогруппа выключает: переключаемся только по включённой
+        button.onClick = [this, i]
+        {
+            if (pageButtons[(size_t) i].getToggleState())
+                showPage (static_cast<Page> (i));
+        };
         addAndMakeVisible (button);
     }
 
+    viewButton.setTooltip ("Theme, accent colour and visual effects");
+    viewButton.onClick = [this] { showViewMenu(); };
+
     addAndMakeVisible (presetBar);
+    addAndMakeVisible (viewButton);
     addAndMakeVisible (voiceLeds);
     addAndMakeVisible (masterControl);
+
+    // При смене пресета ручки не прыгают, а доезжают до новых значений
+    processor.presetManager.onBeforeLoad = [this]
+    {
+        if (! Settings::get().motion)
+            return;
+
+        for (auto& each : controls)
+            each->beginMorph();
+
+        oscPanel.beginMorph();
+        filterPanel.beginMorph();
+        masterControl.beginMorph();
+    };
 
     // Подсказки к "необычным" ручкам
     const std::pair<const char*, const char*> tips[] {
@@ -140,16 +262,21 @@ MainView::MainView (SonderAudioProcessor& p, bool keyboardVisible)
         { sag, "Power supply sag: loud chords pull the pitch down and compress the level" },
         { warmup, "Cold start: after loading or turning this knob the synth drifts flat and settles over a minute" },
         { unit, "Pick a different 'hardware unit' with its own set of component tolerances" },
-        { osc1WtPos, "Wavetable position: morphs through the frames of the table" },
-        { osc2WtPos, "Wavetable position: morphs through the frames of the table" },
         { fmAmount, "Oscillator 2 modulates the frequency of oscillator 1" },
         { ringLevel, "Ring modulation: oscillator 1 multiplied by oscillator 2" },
         { foldAmount, "Wavefolder: folds the waveform back on itself for rich harmonics" },
-        { vowel, "Vowel of the formant filter (A-E-I-O-U), works in Vowel mode" },
-        { filterMode, "Vowel mode turns the filter into a formant 'talking' filter; Cutoff shifts the formants" },
+        { noiseColor, "Noise colour, morphs smoothly: White > Pink > Brown > vinyl Crackle > tape Hiss > pitch-tracked Digital" },
+        { glideCurve, "Shape of the glide: +100% starts fast and eases in, 0% moves at a constant rate, -100% starts slowly" },
+        { glideMode, "Auto: in Legato voice mode glide only between overlapping notes, otherwise always\n"
+                     "Always: glide on every note\n"
+                     "Legato: glide only when a new note starts while another key is still held" },
         { distType, "Distortion after the filter: Tube, Hard clip, Fold, Bit Crush" },
         { vibrato, "Vibrato depth controlled by the mod wheel" },
-        { delayTape, "Tape character of the delay: wow, flutter, darker and saturated repeats" },
+        { arpMode, "Up, Down, Up-Down, Random, or in the order the keys were pressed" },
+        { arpOctaves, "How many octaves up the pattern repeats" },
+        { arpRate, "Step length. With the host transport playing, steps follow its grid" },
+        { arpGate, "How long each note sounds, as a share of the step" },
+        { arpSwing, "Delays every second step: shuffle feel" },
     };
 
     for (const auto& [id, tip] : tips)
@@ -161,9 +288,9 @@ MainView::MainView (SonderAudioProcessor& p, bool keyboardVisible)
         keyboard.setAvailableRange (kFirstKey, kLastKey);
         keyboard.setScrollButtonsVisible (false);
         keyboard.setOctaveForMiddleC (4);
-        keyboard.setColour (juce::MidiKeyboardComponent::whiteNoteColourId, juce::Colour (0xffc6d3d7));
-        keyboard.setColour (juce::MidiKeyboardComponent::blackNoteColourId, juce::Colour (0xff0d1518));
-        keyboard.setColour (juce::MidiKeyboardComponent::keySeparatorLineColourId, juce::Colour (0xff6a8188));
+        keyboard.setColour (juce::MidiKeyboardComponent::whiteNoteColourId, themed (0xffc6d3d7));
+        keyboard.setColour (juce::MidiKeyboardComponent::blackNoteColourId, themed (0xff0d1518));
+        keyboard.setColour (juce::MidiKeyboardComponent::keySeparatorLineColourId, themed (0xff6a8188));
         keyboard.setColour (juce::MidiKeyboardComponent::mouseOverKeyOverlayColourId, Palette::accent.withAlpha (0.3f));
         keyboard.setColour (juce::MidiKeyboardComponent::keyDownOverlayColourId, Palette::accent.withAlpha (0.85f));
         keyboard.setColour (juce::MidiKeyboardComponent::shadowColourId, juce::Colours::black.withAlpha (0.35f));
@@ -171,8 +298,143 @@ MainView::MainView (SonderAudioProcessor& p, bool keyboardVisible)
     }
 
     setSize (kWidth, getDesignHeight());
-    pageButtons[0].setToggleState (true, juce::dontSendNotification);
-    showPage (synthPage);
+
+    // Открываем ту страницу, на которой окно закрыли (или сменили тему)
+    const int page = juce::jlimit (0, (int) numPages - 1, Settings::get().page);
+    pageButtons[(size_t) page].setToggleState (true, juce::dontSendNotification);
+    showPage (static_cast<Page> (page));
+    startTimerHz (10);
+}
+
+MainView::~MainView()
+{
+    processor.presetManager.onBeforeLoad = nullptr;
+}
+
+void MainView::updateSourceChips()
+{
+    // Вкладок LFO столько, сколько открыто на странице SYNTH
+    const int lfos = LfoPanel::visibleLfoCount (processor);
+    if (lfos == shownLfoChips)
+        return;
+
+    shownLfoChips = lfos;
+    for (size_t i = 0; i < fxSourceChips.size(); ++i)
+        fxSourceChips[i]->setVisible (currentPage == fxPage && (i >= (size_t) kNumLfos || (int) i < lfos));
+
+    resized();
+}
+
+void MainView::timerCallback()
+{
+    updateSourceChips();
+
+    // Холодный синт: окно чуть тусклее и "разгорается" по мере прогрева. Перерисовывать всё окно дорого,
+    // поэтому затемнение меняется ступенями.
+    // Уровни выключенных осцилляторов в микшере - тусклее
+    for (int osc = 0; osc < kNumOscs; ++osc)
+    {
+        if (const auto it = controlsById.find (ParamIDs::oscLevel (osc)); it != controlsById.end())
+        {
+            const bool on = processor.parameters.getRawParameterValue (ParamIDs::oscOn (osc))->load() > 0.5f;
+            const float alpha = on ? 1.0f : 0.4f;
+
+            if (it->second->getAlpha() != alpha)
+                it->second->setAlpha (alpha);
+        }
+    }
+
+    const int step = juce::roundToInt (juce::jlimit (0.0f, 1.0f, visuals.getCold()) * (float) kColdSteps);
+
+    if (step != coldStep)
+    {
+        coldStep = step;
+        repaint();
+    }
+}
+
+void MainView::paintOverChildren (juce::Graphics& g)
+{
+    if (coldStep > 0)
+        g.fillAll (juce::Colours::black.withAlpha (kMaxColdDim * (float) coldStep / (float) kColdSteps));
+}
+
+void MainView::showViewMenu()
+{
+    const auto& settings = Settings::get();
+    const auto& themes = getThemes();
+    const auto& accents = getAccents();
+
+    constexpr int themeId = 100, accentId = 200, effectId = 300;
+    juce::PopupMenu menu;
+
+    menu.addSectionHeader ("THEME");
+    for (int i = 0; i < (int) themes.size(); ++i)
+        menu.addItem (themeId + i, themes[(size_t) i].name, true, settings.theme == i);
+
+    menu.addSectionHeader ("ACCENT");
+    for (int i = 0; i < (int) accents.size(); ++i)
+    {
+        const auto colour = i == 0 ? juce::Colour (themes[(size_t) settings.theme].accent) : juce::Colour (accents[(size_t) i].colour);
+
+        juce::PopupMenu::Item item (accents[(size_t) i].name);
+        item.itemID = accentId + i;
+        item.image = makeSwatch (colour, settings.accent == i);
+        menu.addItem (std::move (item));
+    }
+
+    menu.addSectionHeader ("EFFECTS");
+    menu.addItem (effectId + 0, "Colour follows the timbre", true, settings.timbreColour);
+    menu.addItem (effectId + 1, "CRT screens: afterglow and scanlines", true, settings.crtScreen);
+    menu.addItem (effectId + 2, "Spectrum behind the filter curve", true, settings.spectrum);
+    menu.addItem (effectId + 3, "Motion: wavetable, knobs, preset changes", true, settings.motion);
+    menu.addItem (effectId + 4, "Warm-up and sag dim the screens", true, settings.analogGlow);
+    menu.addItem (effectId + 5, "Sparks on the oscilloscope", true, settings.particles);
+
+    // Шейдеры считаются на видеокарте; если OpenGL не завёлся, пишем почему
+    if (shaderStage->isAvailable())
+        menu.addItem (effectId + 6, "Shaders: bloom, curved glass, colour fringes", true, settings.shaderFx);
+    else
+        menu.addItem (effectId + 6, "Shaders are not available (" + shaderStage->getStatus() + ")", false, false);
+
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (viewButton),
+                        [safeThis = juce::Component::SafePointer<MainView> (this)] (int result)
+    {
+        if (safeThis == nullptr || result == 0)
+            return;
+
+        auto& current = Settings::get();
+
+        if (result >= effectId)
+        {
+            bool* flags[] { &current.timbreColour, &current.crtScreen, &current.spectrum, &current.motion, &current.analogGlow,
+                            &current.particles, &current.shaderFx };
+            if (juce::isPositiveAndBelow (result - effectId, (int) std::size (flags)))
+                *flags[result - effectId] = ! *flags[result - effectId];
+
+            current.save();
+            safeThis->repaint();
+            return;
+        }
+
+        if (result >= accentId)
+        {
+            current.accent = result - accentId;
+        }
+        else
+        {
+            // Новая тема приходит со своим цветом акцента
+            current.theme = result - themeId;
+            current.accent = 0;
+        }
+
+        current.save();
+        applyTheme (current);
+
+        // Колбэк пересоздаёт это окно, поэтому вызываем его копию и после этого ничего не трогаем
+        if (const auto changed = safeThis->onThemeChanged)
+            changed();
+    });
 }
 
 int MainView::getDesignHeight() const noexcept
@@ -181,7 +443,7 @@ int MainView::getDesignHeight() const noexcept
                         : kContentBottom + kMargin;
 }
 
-ParameterControl* MainView::control (const char* id, const char* label)
+ParameterControl* MainView::control (const juce::String& id, const char* label)
 {
     auto& created = controls.emplace_back (std::make_unique<ParameterControl> (processor, id, label));
     addChildComponent (*created);
@@ -190,7 +452,7 @@ ParameterControl* MainView::control (const char* id, const char* label)
 }
 
 MainView::Panel& MainView::addPanel (Page page, const juce::String& title, juce::Rectangle<int> bounds, int columns,
-                                     std::initializer_list<std::pair<const char*, const char*>> items)
+                                     std::initializer_list<std::pair<juce::String, const char*>> items)
 {
     Panel panel;
     panel.title = title;
@@ -199,7 +461,7 @@ MainView::Panel& MainView::addPanel (Page page, const juce::String& title, juce:
     panel.columns = columns;
 
     for (const auto& [id, label] : items)
-        panel.cells.push_back (id != nullptr ? control (id, label) : nullptr);
+        panel.cells.push_back (id.isNotEmpty() ? control (id, label) : nullptr);
 
     panels.push_back (std::move (panel));
     return panels.back();
@@ -208,6 +470,7 @@ MainView::Panel& MainView::addPanel (Page page, const juce::String& title, juce:
 void MainView::showPage (Page page)
 {
     currentPage = page;
+    Settings::get().page = (int) page;
 
     // Сначала прячем всё, потом показываем текущую страницу: экран осциллографа общий для двух страниц
     for (auto& panel : panels)
@@ -233,6 +496,17 @@ void MainView::showPage (Page page)
             panel.display->setVisible (true);
     }
 
+    fxRackView.setVisible (page == fxPage);
+    expressionPanel.setVisible (page == playPage);
+    tuningPanel.setVisible (page == playPage);
+    arpOnButton.setVisible (page == playPage);
+    shownLfoChips = -1;
+    updateSourceChips();
+    arpHoldButton.setVisible (page == playPage);
+    mpeButton.setVisible (page == playPage);
+    oscPanel.setVisible (page == synthPage);
+    filterPanel.setVisible (page == synthPage);
+    distPositionButton.setVisible (page == synthPage);
     lfoPanel.setVisible (page == synthPage);
     filterEnvelopeHandle.setVisible (page == synthPage);
     ampEnvelopeHandle.setVisible (page == synthPage);
@@ -289,6 +563,46 @@ void MainView::resized()
         if (panel.title == "LFO")
             lfoPanel.setBounds (panel.bounds);
 
+        if (panel.title == "OSC")
+            oscPanel.setBounds (panel.bounds);
+
+        if (panel.title == "FILTER")
+            filterPanel.setBounds (panel.bounds);
+
+        if (panel.title == "DISTORTION")
+            distPositionButton.setBounds (panel.bounds.getRight() - 8 - 44, panel.bounds.getY() + 3, 44, 20);
+
+        if (panel.title == "EFFECTS")
+        {
+            fxRackView.setBounds (panel.bounds);
+
+            // Источники модуляции в заголовке рэка, после названия панели
+            int x = panel.bounds.getX() + 110;
+            for (auto& chip : fxSourceChips)
+            {
+                if (! chip->isVisible())
+                    continue;
+
+                chip->setBounds (x, panel.bounds.getY() + 4, 54, 18);
+                x += 58;
+            }
+        }
+
+        if (panel.title == "ARPEGGIATOR")
+        {
+            arpOnButton.setBounds (panel.bounds.getRight() - 8 - 44, panel.bounds.getY() + 3, 44, 20);
+            arpHoldButton.setBounds (arpOnButton.getX() - 8 - 56, panel.bounds.getY() + 3, 56, 20);
+        }
+
+        if (panel.title == "EXPRESSION")
+        {
+            expressionPanel.setBounds (panel.bounds);
+            mpeButton.setBounds (panel.bounds.getRight() - 8 - 52, panel.bounds.getY() + 3, 52, 20);
+        }
+
+        if (panel.title == "TUNING")
+            tuningPanel.setBounds (panel.bounds);
+
         // Значки-источники в заголовках огибающих
         if (panel.title == "FILTER ENV")
             filterEnvelopeHandle.setBounds (panel.bounds.getRight() - 30, panel.bounds.getY() + 3, 22, 20);
@@ -314,9 +628,10 @@ void MainView::resized()
 
     // Шапка
     for (int i = 0; i < numPages; ++i)
-        pageButtons[(size_t) i].setBounds (384 + i * 84, 22, 78, 28);
+        pageButtons[(size_t) i].setBounds (384 + i * 68, 22, 64, 28);
 
-    presetBar.setBounds (660, 21, 420, 30);
+    presetBar.setBounds (660, 21, 386, 30);
+    viewButton.setBounds (1054, 21, 30, 30);
     voiceLeds.setBounds (1102, 17, 150, 38);
     masterControl.setBounds (1266, 16, 122, 40);
 
@@ -390,7 +705,7 @@ void MainView::paint (juce::Graphics& g)
 
         g.setColour (Palette::text.withAlpha (0.85f));
         g.setFont (makeFont (11.0f, true, 0.18f));
-        g.drawText (panel.title, panel.bounds.getX() + 21, panel.bounds.getY() + 4, panel.bounds.getWidth() - 30,
+        g.drawText (panel.title, panel.bounds.getX() + 21, panel.bounds.getY() + 4, panel.bounds.getWidth() - 60,
                     20, juce::Justification::centredLeft);
     }
 }

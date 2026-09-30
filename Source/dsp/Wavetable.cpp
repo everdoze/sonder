@@ -78,14 +78,76 @@ std::shared_ptr<const Wavetable> Wavetable::create (const juce::String& tableNam
     return table;
 }
 
-int Wavetable::levelForFrequency (float frequencyOverSampleRate) noexcept
+std::shared_ptr<const Wavetable> Wavetable::createHarmonic (const juce::String& tableName,
+                                                           const std::function<std::pair<double, double> (int)>& amplitude)
 {
-    // Уровень k хранит 1024 >> k гармоник; нужно, чтобы все они были ниже Найквиста
-    const float x = 2048.0f * frequencyOverSampleRate;
-    if (x <= 1.0f)
-        return 0;
+    std::shared_ptr<Wavetable> table (new Wavetable());
+    table->name = tableName;
+    table->numFrames = 1;
 
-    return juce::jlimit (0, kNumLevels - 1, (int) std::ceil (std::log2 (x)));
+    // Синус и косинус по целым фазам: k * n по модулю размера - точные значения без накопления ошибки
+    constexpr int size = kClassicSize;
+    std::vector<double> sine ((size_t) size);
+    for (int n = 0; n < size; ++n)
+        sine[(size_t) n] = std::sin (2.0 * juce::MathConstants<double>::pi * n / size);
+
+    std::vector<std::pair<double, double>> amplitudes (1025);
+    for (int k = 1; k <= 1024; ++k)
+        amplitudes[(size_t) k] = amplitude (k);
+
+    for (int level = 0; level < kNumLevels; ++level)
+    {
+        const int maxHarmonic = 1024 >> level;
+        auto& destination = table->levels[(size_t) level];
+        destination.size = size;
+        destination.data.assign ((size_t) size, 0.0f);
+
+        for (int n = 0; n < size; ++n)
+        {
+            double value = 0.0;
+            for (int k = 1; k <= maxHarmonic; ++k)
+            {
+                const auto [sinAmplitude, cosAmplitude] = amplitudes[(size_t) k];
+                if (sinAmplitude == 0.0 && cosAmplitude == 0.0)
+                    continue;
+
+                const int index = (k * n) & (size - 1);
+                value += sinAmplitude * sine[(size_t) index] + cosAmplitude * sine[(size_t) ((index + size / 4) & (size - 1))];
+            }
+
+            destination.data[(size_t) n] = (float) value;
+        }
+    }
+
+    return table;
+}
+
+Wavetable::MipSelection Wavetable::selectMip (float frequencyOverSampleRate) noexcept
+{
+    // Уровень k хранит 1024 >> k гармоник; безопасен тот, где все они ниже Найквиста: k = ceil (log2 (2048 * f / fs)).
+    // Внутри октавы плавно переходим к следующему уровню, и на границе переключение уже не слышно.
+    const float x = 2048.0f * frequencyOverSampleRate;
+    if (x <= 0.5f)
+        return {};
+
+    const float logX = std::log2 (x);
+    int level = (int) std::ceil (logX);
+    float blend = 0.0f;
+
+    if (level <= 0)
+    {
+        level = 0;
+        blend = juce::jlimit (0.0f, 1.0f, logX + 1.0f);
+    }
+    else
+    {
+        blend = logX - (float) (level - 1);
+    }
+
+    if (level >= kNumLevels - 1)
+        return { kNumLevels - 1, 0.0f };
+
+    return { level, blend };
 }
 
 float Wavetable::read (const Level& level, int frame, float phase) const noexcept
@@ -100,9 +162,8 @@ float Wavetable::read (const Level& level, int frame, float phase) const noexcep
     return a + (b - a) * frac;
 }
 
-float Wavetable::sample (float phase, float position, int levelIndex) const noexcept
+float Wavetable::sampleLevel (const Level& level, float phase, float position) const noexcept
 {
-    const auto& level = levels[(size_t) levelIndex];
     const float framePosition = juce::jlimit (0.0f, 1.0f, position) * (float) (numFrames - 1);
     const int frame0 = (int) framePosition;
     const float frac = framePosition - (float) frame0;
@@ -115,6 +176,16 @@ float Wavetable::sample (float phase, float position, int levelIndex) const noex
     return a + (b - a) * frac;
 }
 
+float Wavetable::sample (float phase, float position, MipSelection mip) const noexcept
+{
+    const float a = sampleLevel (levels[(size_t) mip.level], phase, position);
+    if (mip.blend <= 0.001f || mip.level + 1 >= kNumLevels)
+        return a;
+
+    const float b = sampleLevel (levels[(size_t) mip.level + 1], phase, position);
+    return a + (b - a) * mip.blend;
+}
+
 const float* Wavetable::getFrame (int frame) const noexcept
 {
     return levels[0].data.data() + (size_t) juce::jlimit (0, numFrames - 1, frame) * (size_t) levels[0].size;
@@ -125,12 +196,14 @@ namespace
 {
     constexpr int kBuiltInFrames = 64;
     constexpr int N = Wavetable::kFrameSize;
+    constexpr int kMaxPartials = 512;
 
-    using FrameFunction = std::function<float (float t, float morph)>;
+    using Frames = std::vector<std::vector<float>>;
 
-    std::vector<std::vector<float>> render (const FrameFunction& function)
+    // Таблица, заданная формулой во времени: y (t, morph)
+    Frames render (const std::function<float (float t, float morph)>& function)
     {
-        std::vector<std::vector<float>> frames ((size_t) kBuiltInFrames, std::vector<float> ((size_t) N));
+        Frames frames ((size_t) kBuiltInFrames, std::vector<float> ((size_t) N));
 
         for (int f = 0; f < kBuiltInFrames; ++f)
         {
@@ -140,6 +213,54 @@ namespace
         }
 
         return frames;
+    }
+
+    struct Partial
+    {
+        float amplitude = 0.0f, phase = 0.0f; // фаза в радианах
+    };
+
+    using Spectrum = std::array<Partial, kMaxPartials + 1>; // индекс - номер гармоники
+
+    // Таблица, заданная спектром: кадр собирается обратным БПФ (на порядки быстрее суммы синусов)
+    Frames renderAdditive (const std::function<void (float morph, Spectrum& partials)>& function)
+    {
+        juce::dsp::FFT fft (11);
+        Frames frames ((size_t) kBuiltInFrames, std::vector<float> ((size_t) N));
+        std::vector<float> bins ((size_t) N * 2);
+        auto spectrum = std::make_unique<Spectrum>();
+
+        for (int f = 0; f < kBuiltInFrames; ++f)
+        {
+            *spectrum = {};
+            function ((float) f / (float) (kBuiltInFrames - 1), *spectrum);
+
+            // a * sin (theta + phi)  <=>  Re = a * sin (phi), Im = -a * cos (phi)
+            std::fill (bins.begin(), bins.end(), 0.0f);
+            for (int h = 1; h <= kMaxPartials; ++h)
+            {
+                const auto& partial = (*spectrum)[(size_t) h];
+                bins[(size_t) h * 2] = partial.amplitude * std::sin (partial.phase);
+                bins[(size_t) h * 2 + 1] = -partial.amplitude * std::cos (partial.phase);
+            }
+
+            fft.performRealOnlyInverseTransform (bins.data());
+            std::copy_n (bins.begin(), N, frames[(size_t) f].begin());
+        }
+
+        return frames;
+    }
+
+    // Детерминированное "случайное" число в [0, 1): таблицы одинаковы от запуска к запуску
+    float hash01 (uint32_t a, uint32_t b = 0)
+    {
+        uint32_t h = a * 0x9e3779b1u ^ (b * 0x85ebca77u + 0x165667b1u);
+        h ^= h >> 15;
+        h *= 0x2c1b3c6du;
+        h ^= h >> 12;
+        h *= 0x297a2d39u;
+        h ^= h >> 15;
+        return (float) (h >> 8) / 16777216.0f;
     }
 
     float sine (float t)     { return std::sin (twoPi * t); }
@@ -157,62 +278,75 @@ namespace
         { { 300.0f,  870.0f, 2240.0f }, { 1.0f, 0.35f, 0.15f } }, // U
     };
 
-    std::vector<std::vector<float>> renderVocal()
+    // Гармоники 110 Гц, амплитуды повторяют формантную огибающую гласной A-E-I-O-U
+    void vocalSpectrum (float morph, Spectrum& partials)
     {
-        // Аддитивно: гармоники 110 Гц, амплитуды повторяют формантную огибающую гласной
         constexpr float f0 = 110.0f;
-        constexpr int harmonics = 180;
-        std::vector<std::vector<float>> frames ((size_t) kBuiltInFrames, std::vector<float> ((size_t) N, 0.0f));
+        const float position = morph * 4.0f;
+        const int v0 = juce::jmin (3, (int) position);
+        const float a = position - (float) v0;
 
-        for (int f = 0; f < kBuiltInFrames; ++f)
+        for (int h = 1; h <= 180; ++h)
         {
-            const float position = (float) f / (float) (kBuiltInFrames - 1) * 4.0f;
-            const int v0 = juce::jmin (3, (int) position);
-            const float a = position - (float) v0;
+            const float frequency = f0 * (float) h;
+            float amplitude = 0.0f;
 
-            std::array<float, harmonics + 1> amplitudes {};
-            for (int h = 1; h <= harmonics; ++h)
+            for (int formant = 0; formant < 3; ++formant)
             {
-                const float frequency = f0 * (float) h;
-                float amplitude = 0.0f;
-
-                for (int formant = 0; formant < 3; ++formant)
-                {
-                    const float centre = std::exp (std::log (vowelTable[v0].freq[formant]) * (1.0f - a)
-                                                   + std::log (vowelTable[v0 + 1].freq[formant]) * a);
-                    const float gain = vowelTable[v0].gain[formant] * (1.0f - a) + vowelTable[v0 + 1].gain[formant] * a;
-                    const float bandwidth = 60.0f + 0.06f * centre;
-                    const float x = (frequency - centre) / bandwidth;
-                    amplitude += gain / (1.0f + x * x);
-                }
-
-                amplitudes[(size_t) h] = amplitude + 0.02f / (float) h;
+                const float centre = std::exp (std::log (vowelTable[v0].freq[formant]) * (1.0f - a)
+                                               + std::log (vowelTable[v0 + 1].freq[formant]) * a);
+                const float gain = vowelTable[v0].gain[formant] * (1.0f - a) + vowelTable[v0 + 1].gain[formant] * a;
+                const float bandwidth = 60.0f + 0.06f * centre;
+                const float x = (frequency - centre) / bandwidth;
+                amplitude += gain / (1.0f + x * x);
             }
 
-            for (int i = 0; i < N; ++i)
-            {
-                const float t = (float) i / (float) N;
-                float sum = 0.0f;
-                for (int h = 1; h <= harmonics; ++h)
-                    sum += amplitudes[(size_t) h] * std::sin (twoPi * t * (float) h);
-
-                frames[(size_t) f][(size_t) i] = sum;
-            }
+            partials[(size_t) h].amplitude = amplitude + 0.02f / (float) h;
         }
-
-        return frames;
     }
+}
+
+const Wavetable& Wavetables::classicSaw()
+{
+    // 2t - 1 = -(2 / pi) * sum sin (2 pi k t) / k
+    static const auto table = Wavetable::createHarmonic ("Saw", [] (int k)
+    {
+        return std::pair { -2.0 / (juce::MathConstants<double>::pi * k), 0.0 };
+    });
+    return *table;
+}
+
+const Wavetable& Wavetables::classicTriangle()
+{
+    // 1 - 4 |t - 0.5| = -(8 / pi^2) * sum cos (2 pi k t) / k^2 по нечётным k
+    static const auto table = Wavetable::createHarmonic ("Triangle", [] (int k)
+    {
+        const double pi = juce::MathConstants<double>::pi;
+        return std::pair { 0.0, k % 2 == 1 ? -8.0 / (pi * pi * k * k) : 0.0 };
+    });
+    return *table;
+}
+
+const Wavetable& Wavetables::classicSine()
+{
+    static const auto table = Wavetable::createHarmonic ("Sine", [] (int k)
+    {
+        return std::pair { k == 1 ? 1.0 : 0.0, 0.0 };
+    });
+    return *table;
 }
 
 const juce::StringArray& Wavetables::builtInNames()
 {
-    static const juce::StringArray names { "Basic Shapes", "PWM", "Harmonic Sweep", "Vocal", "FM Growl", "Sync", "Fold" };
+    static const juce::StringArray names { "Basic Shapes", "PWM", "Harmonic Sweep", "Vocal", "FM Growl", "Sync", "Fold",
+                                           "Analog", "Organ", "Digital", "Resonant", "Metallic", "Formant Sweep",
+                                           "Spectral Noise", "Crush" };
     return names;
 }
 
 std::shared_ptr<const Wavetable> Wavetables::createBuiltIn (const juce::String& name)
 {
-    std::vector<std::vector<float>> frames;
+    Frames frames;
 
     if (name == "Basic Shapes")
     {
@@ -233,18 +367,17 @@ std::shared_ptr<const Wavetable> Wavetables::createBuiltIn (const juce::String& 
     }
     else if (name == "Harmonic Sweep")
     {
-        frames = render ([] (float t, float morph)
+        // Гармоники добавляются по одной, последняя плавно "въезжает"
+        frames = renderAdditive ([] (float morph, Spectrum& partials)
         {
-            const int count = 1 + juce::roundToInt (morph * 63.0f);
-            float sum = 0.0f;
-            for (int h = 1; h <= count; ++h)
-                sum += std::sin (twoPi * t * (float) h) / (float) h;
-            return sum;
+            const float count = 1.0f + morph * 63.0f;
+            for (int h = 1; h <= 64; ++h)
+                partials[(size_t) h].amplitude = juce::jlimit (0.0f, 1.0f, count - (float) (h - 1)) / (float) h;
         });
     }
     else if (name == "Vocal")
     {
-        frames = renderVocal();
+        frames = renderAdditive (vocalSpectrum);
     }
     else if (name == "FM Growl")
     {
@@ -264,6 +397,124 @@ std::shared_ptr<const Wavetable> Wavetables::createBuiltIn (const juce::String& 
         frames = render ([] (float t, float morph)
         {
             return std::sin (juce::MathConstants<float>::halfPi * (1.0f + morph * 7.0f) * std::sin (twoPi * t));
+        });
+    }
+    else if (name == "Analog")
+    {
+        // "Неидеальная" аналоговая пила, переходящая в меандр: завал верхов и небольшой разброс фаз гармоник
+        frames = renderAdditive ([] (float morph, Spectrum& partials)
+        {
+            for (int h = 1; h <= 300; ++h)
+            {
+                const float even = h % 2 == 0 ? 1.0f - morph : 1.0f;
+                const float rolloff = 1.0f / std::sqrt (1.0f + (float) (h * h) / (48.0f * 48.0f));
+                partials[(size_t) h] = { even * rolloff / (float) h, 0.25f * std::sin ((float) h * 1.7f) };
+            }
+        });
+    }
+    else if (name == "Organ")
+    {
+        // Регистры электрооргана выдвигаются один за другим
+        frames = renderAdditive ([] (float morph, Spectrum& partials)
+        {
+            static constexpr int drawbars[] { 1, 2, 3, 4, 6, 8, 10, 12, 16 };
+            static constexpr float levels[] { 1.0f, 0.8f, 0.7f, 0.55f, 0.45f, 0.4f, 0.3f, 0.25f, 0.2f };
+
+            for (int k = 0; k < 9; ++k)
+            {
+                const float weight = k == 0 ? 1.0f : juce::jlimit (0.0f, 1.0f, morph * 8.0f - (float) (k - 1));
+                // Фазы регистров разные, как у независимых колёс: иначе пики складываются в острые всплески
+                partials[(size_t) drawbars[k]] = { levels[k] * weight, twoPi * hash01 ((uint32_t) k, 11u) };
+            }
+        });
+    }
+    else if (name == "Digital")
+    {
+        // В духе ранних цифровых синтов: восемь "случайных" спектров, между которыми идёт морф
+        frames = renderAdditive ([] (float morph, Spectrum& partials)
+        {
+            const float position = morph * 7.0f;
+            const int key = juce::jmin (6, (int) position);
+            const float a = position - (float) key;
+            const auto amplitude = [] (int h, int spectrum)
+            {
+                const float r = hash01 ((uint32_t) h, (uint32_t) spectrum + 17u);
+                return r < 0.45f ? 0.0f : r * r / std::sqrt ((float) h);
+            };
+
+            partials[1].amplitude = 1.0f;
+            for (int h = 2; h <= 40; ++h)
+                partials[(size_t) h].amplitude = amplitude (h, key) * (1.0f - a) + amplitude (h, key + 1) * a;
+        });
+    }
+    else if (name == "Resonant")
+    {
+        // Пила с резонансным пиком, который едет вверх, как срез фильтра с высоким резонансом
+        frames = renderAdditive ([] (float morph, Spectrum& partials)
+        {
+            const float centre = 1.0f + morph * 40.0f;
+            const float width = 1.5f + 0.05f * centre;
+            for (int h = 1; h <= 160; ++h)
+            {
+                const float x = ((float) h - centre) / width;
+                partials[(size_t) h].amplitude = (1.0f + 8.0f / (1.0f + x * x)) / (float) h;
+            }
+        });
+    }
+    else if (name == "Metallic")
+    {
+        // Обертоны "расползаются" от гармонического ряда, как у жёсткой струны или колокола
+        frames = renderAdditive ([] (float morph, Spectrum& partials)
+        {
+            const float stiffness = 0.0005f + morph * 0.03f;
+            for (int k = 1; k <= 28; ++k)
+            {
+                const int h = juce::roundToInt ((float) k * std::sqrt (1.0f + stiffness * (float) (k * k)));
+                if (h > kMaxPartials)
+                    break;
+
+                partials[(size_t) h].amplitude += std::pow ((float) k, -0.8f);
+                partials[(size_t) h].phase = twoPi * hash01 ((uint32_t) k, 5u);
+            }
+        });
+    }
+    else if (name == "Formant Sweep")
+    {
+        // Одна форманта, проезжающая по гармоникам: эффект "ток-бокса"
+        frames = renderAdditive ([] (float morph, Spectrum& partials)
+        {
+            const float centre = 1.5f + morph * 30.0f;
+            const float width = 1.2f + 0.12f * centre;
+            for (int h = 1; h <= 120; ++h)
+            {
+                const float x = ((float) h - centre) / width;
+                partials[(size_t) h].amplitude = std::exp (-x * x) + 0.25f / (float) h;
+            }
+        });
+    }
+    else if (name == "Spectral Noise")
+    {
+        // Плотный спектр со случайными фазами: от гула к шипящему "жужжанию"
+        frames = renderAdditive ([] (float morph, Spectrum& partials)
+        {
+            const float count = 6.0f + morph * 250.0f;
+            for (int h = 1; h <= 256; ++h)
+            {
+                const float fade = juce::jlimit (0.0f, 1.0f, count - (float) (h - 1));
+                partials[(size_t) h] = { fade * (0.3f + 0.7f * hash01 ((uint32_t) h, 3u)) / std::sqrt ((float) h),
+                                         twoPi * hash01 ((uint32_t) h, 9u) };
+            }
+        });
+    }
+    else if (name == "Crush")
+    {
+        // Синус, у которого падают разрядность и частота дискретизации
+        frames = render ([] (float t, float morph)
+        {
+            const float steps = std::floor (256.0f * std::exp2 (-morph * 5.4f));
+            const float levels = 2.0f + (1.0f - morph) * 30.0f;
+            const float held = std::floor (t * steps) / steps;
+            return std::round (std::sin (twoPi * held) * levels) / levels;
         });
     }
     else
@@ -308,7 +559,7 @@ std::shared_ptr<const Wavetable> Wavetables::loadFromFile (const juce::File& fil
     int numFrames = juce::jmax (1, length / frameSize);
     const int step = numFrames > Wavetable::kMaxFrames ? numFrames / Wavetable::kMaxFrames : 1;
 
-    std::vector<std::vector<float>> frames;
+    Frames frames;
     for (int f = 0; f < numFrames && (int) frames.size() < Wavetable::kMaxFrames; f += step)
     {
         // Пересэмплирование кадра в 2048 точек

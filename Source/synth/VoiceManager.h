@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Tuning.h"
 #include "Voice.h"
 
 #include <juce_audio_basics/juce_audio_basics.h>
@@ -9,6 +10,8 @@ namespace sonder
 
 // Распределение нот по голосам (Poly с ротацией голосов, как у аналоговых полифоников, Mono, Legato),
 // педаль сустейна, колесо модуляции, питч-бенд и афтертач.
+// Высота ноты берётся из строя (Tuning). Полифонический афтертач и MPE (канал на ноту: свой бенд,
+// давление и слайд - CC74) доходят до своего голоса; в MPE первый канал - общий для всех нот.
 class VoiceManager
 {
 public:
@@ -25,16 +28,28 @@ public:
 
     void allNotesOff (bool immediately);
 
+    void setTuning (const Tuning* newTuning) noexcept { tuning = newTuning; }
+
+    // Последние значения контроллеров (для общих модуляций, когда ни один голос не звучит)
+    float getModWheel() const noexcept  { return modWheelValue; }
+    float getAftertouch() const noexcept { return aftertouchValue; }
+    float getSlide() const noexcept     { return slideValue; }
+
     uint32_t getActiveVoiceMask() const noexcept;
     float getLastNoteFrequency() const noexcept { return lastNoteFrequency; }
 
     // Последний запущенный звучащий голос: по нему интерфейс рисует LFO и фильтр
     const Voice* getDisplayVoice() const noexcept;
+    const Voice& getVoice (int index) const noexcept { return voices[(size_t) index]; }
 
 private:
     void handleMessage (const juce::MidiMessage& message, const SynthParams& params, const ModulationBus& bus, int position);
-    void noteOn (int note, float velocity, const SynthParams& params, const ModulationBus& bus, int position);
-    void noteOff (int note);
+    void noteOn (int note, float velocity, int channel, const SynthParams& params, const ModulationBus& bus, int position);
+    float pitchFor (int note) const noexcept { return tuning != nullptr ? tuning->pitchFor (note) : (float) note; }
+    bool isMemberChannel (int channel, const SynthParams& params) const noexcept { return params.mpe && channel >= 2; }
+    void startExpression (Voice& voice, int channel, const SynthParams& params);
+    void noteOff (int note, const SynthParams& params);
+    bool shouldGlide (const SynthParams& params, bool overlapping) const noexcept;
     void releaseSustainedNotes();
     int chooseVoice (int polyphony) const;
     void renderSegment (float* left, float* right, int start, int end, const SynthParams& params, ModulationBus& bus);
@@ -49,7 +64,12 @@ private:
     std::vector<float> modWheelBuffer, aftertouchBuffer, pitchBendBuffer;
     float modWheelTarget = 0.0f, aftertouchTarget = 0.0f, pitchBendTarget = 0.0f;
     float modWheelValue = 0.0f, aftertouchValue = 0.0f, pitchBendValue = 0.0f;
+    float slideValue = 0.0f;
     float controlSmoothingCoef = 1.0f;
+
+    // MPE: последние бенд (-1..1), давление и слайд каждого канала - нота берёт их при старте
+    std::array<float, 17> channelBend {}, channelPressure {}, channelSlide {};
+    const Tuning* tuning = nullptr;
 
     std::array<int, 128> heldNotes {};
     int numHeldNotes = 0;

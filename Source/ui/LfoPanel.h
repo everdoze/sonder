@@ -16,6 +16,9 @@ class LfoPanel final : public juce::Component, private juce::Timer
 public:
     explicit LfoPanel (SonderAudioProcessor& processor);
 
+    // Сколько вкладок LFO открыто (не меньше двух и все, что задействованы в матрице)
+    static int visibleLfoCount (SonderAudioProcessor& processor);
+
     void resized() override;
     void paintOverChildren (juce::Graphics&) override;
 

@@ -2,6 +2,7 @@
 #include "PluginEditor.h"
 #include "dsp/Saturation.h"
 #include "presets/FactoryPresets.h"
+#include "synth/ModRouting.h"
 
 namespace
 {
@@ -9,14 +10,26 @@ namespace
     constexpr float kMaxWarmupDetuneCents = 40.0f;
     constexpr float kMaxSagCents = 25.0f;
     constexpr float kMaxSagGainDrop = 0.3f;
+
+    // Уровень, с которым сумма голосов приходит на аналоговый выходной каскад (tanh).
+    // Ручка Master стоит в самом конце, после эффектов, и отсчитывается от этого же уровня:
+    // при -9 дБ (значение по умолчанию) она ничего не меняет.
+    constexpr float kOutputStageDb = -9.0f;
 }
 
 SonderAudioProcessor::SonderAudioProcessor()
     : AudioProcessor (BusesProperties().withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
-      parameters (*this, nullptr, "Parameters", sonder::createParameterLayout()),
-      presetManager (parameters, lfoShapes, wavetables),
+      parameters (*this, nullptr, "Parameters", sonder::createParameterLayout (fxRack)),
+      fxController (fxRack, parameters, *this),
+      presetManager (parameters, lfoShapes, wavetables, fxController),
       params (parameters)
 {
+    // Шкала каждой цели - шкала её ручки; у ручек рэка значения и так нормированы
+    for (int d = 1; d < (int) sonder::ModDest::count; ++d)
+        if (auto* parameter = parameters.getParameter (sonder::parameterForDestination (static_cast<sonder::ModDest> (d))))
+            destRanges[(size_t) d] = parameter->getNormalisableRange();
+
+    voiceManager.setTuning (&tuning);
 }
 
 bool SonderAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
@@ -40,15 +53,18 @@ void SonderAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock
     const int maxOversampledBlock = maxBlockSize * factor;
 
     voiceManager.prepare (oversampledRate, maxOversampledBlock);
+    arpeggiator.prepare (sampleRate);
+
+    const int records = maxOversampledBlock / sonder::ModulationBus::kLeaderInterval + 2;
+    leaderSources.assign ((size_t) records * (size_t) sonder::ModSource::count, 0.0f);
+    leaderWritten.assign ((size_t) records, 0);
+    tapBuffer.assign ((size_t) maxOversampledBlock, 0.0f);
     oversampledMidi.ensureSize (4096);
 
-    chorus.prepare (sampleRate);
-    delay.prepare (sampleRate);
-    reverb.setSampleRate (sampleRate);
-    reverb.reset();
+    fxChain.prepare (sampleRate, maxBlockSize);
 
-    masterGain.reset (oversampledRate, 0.05);
-    masterGain.setCurrentAndTargetValue (juce::Decibels::decibelsToGain (params.masterGain->load()));
+    masterGain.reset (sampleRate, 0.05);
+    masterGain.setCurrentAndTargetValue (juce::Decibels::decibelsToGain (params.masterGain->load() - kOutputStageDb));
 
     scope.sampleRate.store ((float) sampleRate);
     setLatencySamples (juce::roundToInt (oversampling->getLatencyInSamples()));
@@ -75,22 +91,34 @@ SonderAudioProcessor::Transport SonderAudioProcessor::readTransport() const
     return transport;
 }
 
+float SonderAudioProcessor::globalModulated (sonder::ModDest dest, float base) const noexcept
+{
+    // Модуляция последней записи прошлого блока: для величин, которые считаются раз в блок
+    const float modulation = globalModulation[(size_t) sonder::globalIndex (dest)];
+    return modulation != 0.0f ? sonder::applyModulation (dest, base, modulation, destRanges[(size_t) dest]) : base;
+}
+
 void SonderAudioProcessor::updateAnalogState (int numSamples)
 {
     // Прогрев: после "включения" (загрузки или поворота ручки) генераторы дрейфуют сильнее
-    // и строй занижен, за ~минуту всё успокаивается
-    const float warmupAmount = params.warmup->load();
-    if (std::abs (warmupAmount - lastWarmupAmount) > 0.01f)
+    // и строй занижен, за ~минуту всё успокаивается. Модуляция ручки прогрев не перезапускает.
+    const float warmupKnob = params.warmup->load();
+    if (std::abs (warmupKnob - lastWarmupAmount) > 0.01f)
     {
         warmupSeconds = 0.0;
-        lastWarmupAmount = warmupAmount;
+        lastWarmupAmount = warmupKnob;
     }
+
+    const float warmupAmount = globalModulated (sonder::ModDest::warmup, warmupKnob);
 
     const auto cold = (float) std::exp (-warmupSeconds / kWarmupTimeConstantSeconds);
     warmupSeconds += numSamples / currentSampleRate;
 
     // Просадка питания: чем громче и плотнее играем, тем ниже строй и тише голоса
-    const float sagDepth = params.sag->load() * juce::jmin (1.0f, sagEnvelope * 2.0f);
+    const float sagDepth = globalModulated (sonder::ModDest::sag, params.sag->load()) * juce::jmin (1.0f, sagEnvelope * 2.0f);
+
+    coldAmount = warmupAmount * cold;
+    sagAmount = sagDepth;
 
     analogBus.driftScale = 1.0f + 3.0f * warmupAmount * cold;
     analogBus.globalPitchCents = -kMaxWarmupDetuneCents * warmupAmount * cold - kMaxSagCents * sagDepth;
@@ -107,6 +135,7 @@ void SonderAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
     keyboardState.processNextMidiBuffer (midi, 0, numSamples, true);
 
     const auto transport = readTransport();
+    runArpeggiator (midi, numSamples, transport);
     const auto synthParams = sonder::SynthParams::fromRefs (params, transport.bpm);
 
     // Синхронизированные LFO привязываем к позиции транспорта, чтобы фаза совпадала с тактом
@@ -124,7 +153,7 @@ void SonderAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
         }
     }
 
-    masterGain.setTargetValue (juce::Decibels::decibelsToGain (params.masterGain->load()));
+    masterGain.setTargetValue (juce::Decibels::decibelsToGain (params.masterGain->load() - kOutputStageDb));
 
     // Хост может прислать блок больше заявленного в prepareToPlay, режем на куски
     for (int start = 0; start < numSamples; start += maxBlockSize)
@@ -135,6 +164,22 @@ void SonderAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
     }
 
     updateDisplayState (synthParams);
+}
+
+void SonderAudioProcessor::runArpeggiator (juce::MidiBuffer& midi, int numSamples, const Transport& transport)
+{
+    sonder::Arpeggiator::Settings settings;
+    settings.on = params.arpOn->load() > 0.5f;
+    settings.hold = params.arpHold->load() > 0.5f;
+    settings.mode = static_cast<sonder::Arpeggiator::Mode> ((int) params.arpMode->load());
+    settings.octaves = (int) params.arpOctaves->load();
+    settings.stepBeats = sonder::arpRateInBeats ((int) params.arpRate->load());
+    settings.gate = params.arpGate->load();
+    settings.swing = params.arpSwing->load();
+
+    // Пока транспорт стоит, у арпеджиатора свой такт от первой ноты
+    const auto ppq = transport.isPlaying ? transport.ppq : std::nullopt;
+    arpeggiator.process (midi, numSamples, settings, transport.bpm, ppq);
 }
 
 void SonderAudioProcessor::updateDisplayState (const sonder::SynthParams& synthParams)
@@ -151,14 +196,31 @@ void SonderAudioProcessor::updateDisplayState (const sonder::SynthParams& synthP
         lfoDisplayPhase[(size_t) l].store (phase);
     }
 
-    // Живая модуляция для колец на ручках
+    // Живая модуляция для колец на ручках: голосовые цели - у последнего голоса, общие - у синта
     displayVoiceActive.store (voice != nullptr);
     for (size_t d = 0; d < displayModulation.size(); ++d)
-        displayModulation[d].store (voice != nullptr ? voice->getDisplayModulation()[d] : 0.0f);
+    {
+        const auto dest = static_cast<sonder::ModDest> (d);
+        displayModulation[d].store (sonder::isGlobalDest (dest) ? globalModulation[(size_t) sonder::globalIndex (dest)]
+                                    : voice != nullptr ? voice->getDisplayModulation()[d] : 0.0f);
+    }
 
     // 0 - нет звучащего голоса, интерфейс рисует фильтр по положению ручек
-    displayCutoff.store (voice != nullptr ? voice->getDisplayCutoff() : 0.0f);
-    displayVowel.store (voice != nullptr ? voice->getDisplayVowel() : synthParams.vowel);
+    for (int f = 0; f < sonder::kNumFilters; ++f)
+    {
+        displayCutoff[(size_t) f].store (voice != nullptr ? voice->getDisplayCutoff (f) : 0.0f);
+        displayVowel[(size_t) f].store (voice != nullptr ? voice->getDisplayVowel (f) : synthParams.filters[(size_t) f].vowel);
+    }
+
+    for (int v = 0; v < sonder::VoiceManager::kMaxVoices; ++v)
+    {
+        const auto& each = voiceManager.getVoice (v);
+        displayVoiceLevel[(size_t) v].store (each.getDisplayLevel());
+        displayVoicePitch[(size_t) v].store (each.getCurrentPitch());
+    }
+
+    displayCold.store (coldAmount);
+    displaySag.store (sagAmount);
 }
 
 void SonderAudioProcessor::renderChunk (juce::AudioBuffer<float>& buffer, const juce::MidiBuffer& midi,
@@ -178,12 +240,14 @@ void SonderAudioProcessor::renderChunk (juce::AudioBuffer<float>& buffer, const 
 
     // Общие данные для голосов: таблицы, фазы Free-LFO
     auto bus = analogBus;
-    bus.wavetables = { wavetables.get (0), wavetables.get (1) };
+    for (int osc = 0; osc < sonder::kNumOscs; ++osc)
+        bus.wavetables[(size_t) osc] = wavetables.get (osc);
 
     for (int l = 0; l < sonder::kNumLfos; ++l)
     {
         auto& lfo = globalLfos[(size_t) l];
         bus.lfoTables[(size_t) l] = lfoShapes.getTable (l);
+        bus.lfoPoints[(size_t) l] = lfoShapes.getPointSet (l);
         bus.lfoIncrement[(size_t) l] = synthParams.lfos[(size_t) l].rateHz / (float) oversampledRate;
         bus.lfoPhase[(size_t) l] = (float) lfo.phase;
         bus.lfoCycle[(size_t) l] = lfo.cycle;
@@ -199,6 +263,14 @@ void SonderAudioProcessor::renderChunk (juce::AudioBuffer<float>& buffer, const 
         if (metadata.samplePosition >= startSample && metadata.samplePosition < startSample + numSamples)
             oversampledMidi.addEvent (metadata.getMessage(), (metadata.samplePosition - startSample) * factor);
 
+    std::fill_n (tapBuffer.begin(), numOversampled, 0.0f);
+    bus.displayTap = tapBuffer.data();
+    bus.ranges = &destRanges;
+
+    std::fill (leaderWritten.begin(), leaderWritten.end(), (uint8_t) 0);
+    bus.leaderSources = leaderSources.data();
+    bus.leaderWritten = leaderWritten.data();
+
     voiceManager.render (left, right, numOversampled, oversampledMidi, synthParams, bus);
 
     // Огибающая громкости для просадки питания
@@ -209,54 +281,191 @@ void SonderAudioProcessor::renderChunk (juce::AudioBuffer<float>& buffer, const 
         sumOfSquares += mono * mono;
     }
 
+    // Сигнал до фильтра и после него для спектра на экране фильтра, прореженный до обычной частоты
+    {
+        constexpr int batch = 128;
+        float pre[batch], post[batch];
+        const float norm = 1.0f / (float) factor;
+
+        for (int start = 0; start < numSamples; start += batch)
+        {
+            const int count = juce::jmin (batch, numSamples - start);
+
+            for (int i = 0; i < count; ++i)
+            {
+                float preSum = 0.0f, postSum = 0.0f;
+                for (int k = 0; k < factor; ++k)
+                {
+                    const int index = (start + i) * factor + k;
+                    preSum += tapBuffer[(size_t) index];
+                    postSum += 0.5f * (left[index] + right[index]);
+                }
+
+                pre[i] = preSum * norm;
+                post[i] = postSum * norm;
+            }
+
+            preFilterTap.push (pre, count);
+            postFilterTap.push (post, count);
+        }
+    }
+
     const float rms = std::sqrt (sumOfSquares / (float) juce::jmax (1, numOversampled));
     const float chunkSeconds = (float) numSamples / (float) currentSampleRate;
     const float sagTime = rms > sagEnvelope ? 0.03f : 0.3f;
     sagEnvelope += (rms - sagEnvelope) * (1.0f - std::exp (-chunkSeconds / sagTime));
 
-    // Выходной каскад синта: громкость и мягкое насыщение вместо цифрового клиппинга
+    // Выходной каскад синта: мягкое насыщение вместо цифрового клиппинга
+    const float stageGain = juce::Decibels::decibelsToGain (kOutputStageDb);
     for (int i = 0; i < numOversampled; ++i)
     {
-        const float gain = masterGain.getNextValue();
-        left[i] = sonder::fastTanh (left[i] * gain);
-        right[i] = sonder::fastTanh (right[i] * gain);
+        left[i] = sonder::fastTanh (left[i] * stageGain);
+        right[i] = sonder::fastTanh (right[i] * stageGain);
     }
 
     oversampling->processSamplesDown (block);
 
-    // Эффекты на обычной частоте дискретизации
+    // Рэк эффектов работает на обычной частоте дискретизации
     float* outLeft = block.getChannelPointer (0);
     float* outRight = block.getChannelPointer (1);
 
-    chorus.process (outLeft, outRight, numSamples,
-                    static_cast<sonder::Chorus::Mode> ((int) params.chorusMode->load()), params.chorusMix->load());
-
-    const double delayBeats = sonder::syncDivisionInBeats ((int) params.delaySync->load());
-    const float delaySeconds = delayBeats > 0.0 ? (float) (delayBeats * 60.0 / transport.bpm) : params.delayTime->load();
-    delay.process (outLeft, outRight, numSamples, delaySeconds,
-                   params.delayFeedback->load(), params.delayMix->load(), params.delayTape->load());
-
-    const float reverbMix = params.reverbMix->load();
-    if (reverbMix > 0.001f)
-    {
-        juce::Reverb::Parameters reverbParams;
-        reverbParams.roomSize = 0.3f + 0.69f * params.reverbSize->load();
-        reverbParams.damping = 0.45f;
-        reverbParams.wetLevel = 0.4f * reverbMix;
-        reverbParams.dryLevel = 1.0f - 0.35f * reverbMix;
-        reverbParams.width = 1.0f;
-        reverb.setParameters (reverbParams);
-        reverb.processStereo (outLeft, outRight, numSamples);
-    }
-
-    // Эффекты могут поднять пики выше 0 dBFS: страхуем мягким лимитером
-    for (int i = 0; i < numSamples; ++i)
-    {
-        outLeft[i] = sonder::softLimit (outLeft[i]);
-        outRight[i] = sonder::softLimit (outRight[i]);
-    }
-
+    processEffects (outLeft, outRight, numSamples, synthParams, bus, transport);
+    displayBpm.store ((float) transport.bpm);
     scope.push (outLeft, outRight, numSamples);
+}
+
+void SonderAudioProcessor::computeGlobalSources (int record, const sonder::ModulationBus& bus,
+                                                 const sonder::SynthParams& synthParams)
+{
+    using S = sonder::ModSource;
+    constexpr auto numSources = (size_t) S::count;
+
+    // Звучит ведущий голос - берём его источники как есть
+    if (leaderWritten[(size_t) record] != 0)
+    {
+        std::copy_n (leaderSources.begin() + (std::ptrdiff_t) ((size_t) record * numSources), numSources, globalSources.begin());
+        return;
+    }
+
+    // Иначе: LFO в режиме Free идут дальше по общей фазе, контроллеры - как есть,
+    // огибающие молчат, остальное держит последнее значение
+    const int offset = record * sonder::ModulationBus::kLeaderInterval;
+
+    for (int l = 0; l < sonder::kNumLfos; ++l)
+    {
+        if (synthParams.lfos[(size_t) l].mode != sonder::LfoMode::free)
+            continue;
+
+        const float position = bus.lfoPhase[(size_t) l] + bus.lfoIncrement[(size_t) l] * (float) offset;
+        const float whole = std::floor (position);
+        globalSources[(size_t) sonder::sourceForLfo (l)]
+            = sonder::LfoMath::evaluate (synthParams.lfos[(size_t) l].shape, position - whole,
+                                         bus.lfoCycle[(size_t) l] + (uint32_t) whole, 0x1f0u + (uint32_t) l, bus.lfoTables[(size_t) l]);
+    }
+
+    if (voiceManager.getDisplayVoice() == nullptr)
+    {
+        globalSources[(size_t) S::filterEnv] = 0.0f;
+        globalSources[(size_t) S::ampEnv] = 0.0f;
+    }
+
+    globalSources[(size_t) S::modWheel] = voiceManager.getModWheel();
+    globalSources[(size_t) S::aftertouch] = voiceManager.getAftertouch();
+    globalSources[(size_t) S::slide] = voiceManager.getSlide();
+}
+
+void SonderAudioProcessor::processEffects (float* left, float* right, int numSamples, const sonder::SynthParams& synthParams,
+                                           const sonder::ModulationBus& bus, const Transport& transport)
+{
+    using namespace sonder;
+
+    // Слоты матрицы с общими целями
+    std::array<ModSlot, kNumModSlots> slots {};
+    int numSlots = 0;
+    bool fxModulated = false, masterModulated = false;
+
+    for (const auto& slot : synthParams.modSlots)
+    {
+        if (! synthParams.isActive (slot) || ! isGlobalDest (slot.dest))
+            continue;
+
+        slots[(size_t) numSlots++] = slot;
+        fxModulated |= slot.dest >= ModDest::fxFirst;
+        masterModulated |= slot.dest == ModDest::master;
+    }
+
+    // Master - последним, после эффектов. Пики выше 0 dBFS страхует мягкий лимитер
+    const auto applyMaster = [this] (float* l, float* r, int count, float fromGain, float toGain)
+    {
+        for (int i = 0; i < count; ++i)
+        {
+            const float gain = masterGain.getNextValue() * (fromGain + (toGain - fromGain) * (float) (i + 1) / (float) count);
+            l[i] = softLimit (l[i] * gain);
+            r[i] = softLimit (r[i] * gain);
+        }
+    };
+
+    if (numSlots == 0)
+    {
+        globalModulation.fill (0.0f);
+        fxChain.process (left, right, numSamples, fxRack, params.fxParams, params.fxOn, transport.bpm);
+        applyMaster (left, right, numSamples, masterModGain, 1.0f);
+        masterModGain = 1.0f;
+        return;
+    }
+
+    // Модуляция считается по записям ведущего голоса; эффекты обрабатываются кусками той же длины
+    const int factor = (int) oversampling->getOversamplingFactor();
+    const int chunk = ModulationBus::kLeaderInterval / factor;
+    const float masterBase = params.masterGain->load();
+
+    for (int start = 0, record = 0; start < numSamples; start += chunk, ++record)
+    {
+        const int length = juce::jmin (chunk, numSamples - start);
+        computeGlobalSources (record, bus, synthParams);
+
+        for (const auto& slot : slots)
+            if (slot.source != ModSource::off)
+                globalModulation[(size_t) globalIndex (slot.dest)] = 0.0f;
+
+        for (int s = 0; s < numSlots; ++s)
+        {
+            const auto& slot = slots[(size_t) s];
+            globalModulation[(size_t) globalIndex (slot.dest)]
+                += globalSources[(size_t) slot.source] * slot.scale + slot.offset;
+        }
+
+        if (fxModulated)
+        {
+            fxModulation.fill (0.0f);
+            for (int s = 0; s < numSlots; ++s)
+                if (slots[(size_t) s].dest >= ModDest::fxFirst)
+                {
+                    const auto index = (size_t) ((int) slots[(size_t) s].dest - (int) ModDest::fxFirst);
+                    fxModulation[index] = globalModulation[(size_t) globalIndex (slots[(size_t) s].dest)];
+                }
+        }
+
+        fxChain.process (left + start, right + start, length, fxRack, params.fxParams, params.fxOn, transport.bpm,
+                         fxModulated ? fxModulation.data() : nullptr);
+
+        // Master модулируется в децибелах своей шкалы; внутри куска громкость меняется плавно
+        float targetGain = 1.0f;
+        if (masterModulated)
+            targetGain = juce::Decibels::decibelsToGain (globalModulated (ModDest::master, masterBase) - masterBase);
+
+        applyMaster (left + start, right + start, length, masterModGain, targetGain);
+        masterModGain = targetGain;
+    }
+
+    // Цели, которые больше никто не модулирует, возвращаются к нулю
+    std::array<bool, kNumGlobalDests> active {};
+    for (int s = 0; s < numSlots; ++s)
+        active[(size_t) globalIndex (slots[(size_t) s].dest)] = true;
+
+    for (size_t g = 0; g < active.size(); ++g)
+        if (! active[g])
+            globalModulation[g] = 0.0f;
 }
 
 int SonderAudioProcessor::getNumPrograms()
@@ -293,6 +502,8 @@ void SonderAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
         // Формы LFO и выбор wavetable не параметры - сохраняем рядом
         xml->addChildElement (lfoShapes.toXml().release());
         xml->addChildElement (wavetables.toXml().release());
+        xml->addChildElement (fxController.toXml().release());
+        xml->addChildElement (tuning.toXml().release());
         copyXmlToBinary (*xml, destData);
     }
 }
@@ -306,10 +517,24 @@ void SonderAudioProcessor::setStateInformation (const void* data, int sizeInByte
     lfoShapes.fromXml (xml->getChildByName ("LfoShapes"));
     wavetables.fromXml (xml->getChildByName ("Wavetables"));
 
+    // Что стоит в слотах рэка: без этого значения ручек слотов ничего не значат
+    std::unique_ptr<juce::XmlElement> rackXml;
+    if (const auto* rackElement = xml->getChildByName ("FxRack"))
+        rackXml = std::make_unique<juce::XmlElement> (*rackElement);
+
+    tuning.fromXml (xml->getChildByName ("Tuning"));
+    xml->deleteAllChildElementsWithTagName ("Tuning");
     xml->deleteAllChildElementsWithTagName ("LfoShapes");
     xml->deleteAllChildElementsWithTagName ("Wavetables");
+    xml->deleteAllChildElementsWithTagName ("FxRack");
 
     parameters.replaceState (juce::ValueTree::fromXml (*xml));
+
+    if (rackXml != nullptr)
+        fxController.fromXml (*rackXml);
+    else
+        fxController.clear();
+
     presetManager.syncWithState();
 }
 

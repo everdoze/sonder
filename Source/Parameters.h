@@ -7,19 +7,30 @@ namespace sonder
 
 inline constexpr int kNumModSlots = 32;
 inline constexpr int kNumLfos = 8;
+inline constexpr int kNumOscs = 4;
+inline constexpr int kNumFilters = 2;
+
+// Ручки фильтра: у первого фильтра прежние идентификаторы ("cutoff", "resonance"...), у второго "filter2..."
+enum class FilterParam { on, mode, cutoff, resonance, drive, vowel, envAmount, keyTrack, velocity, count };
 
 namespace ParamIDs
 {
-    inline constexpr auto osc1Shape     = "osc1Shape";
-    inline constexpr auto osc2Shape     = "osc2Shape";
-    inline constexpr auto osc1WtPos     = "osc1WtPos";
-    inline constexpr auto osc2WtPos     = "osc2WtPos";
-    inline constexpr auto osc2Semi      = "osc2Semi";
-    inline constexpr auto osc2Fine      = "osc2Fine";
-    inline constexpr auto oscMix        = "oscMix";
-    inline constexpr auto pulseWidth    = "pulseWidth";
+    // Осцилляторы с нуля: "osc1On", "osc1Shape", "osc1WtPos", "osc1Semi", "osc1Fine", "osc1Pw", "osc1Level"...
+    juce::String oscOn (int osc);
+    juce::String oscShape (int osc);
+    juce::String oscWtPos (int osc);
+    juce::String oscSemi (int osc);
+    juce::String oscFine (int osc);
+    juce::String oscPw (int osc);
+    juce::String oscLevel (int osc);
+    juce::String oscSync (int osc);  // осцилляторы 2-4: сброс фазы по первому (hard sync)
+
+    juce::String filterParam (int filter, FilterParam param);
+    inline constexpr auto filterRouting = "filterRouting";
+
     inline constexpr auto subLevel      = "subLevel";
     inline constexpr auto noiseLevel    = "noiseLevel";
+    inline constexpr auto noiseColor    = "noiseColor";
     inline constexpr auto fmAmount      = "fmAmount";
     inline constexpr auto ringLevel     = "ringLevel";
     inline constexpr auto foldAmount    = "foldAmount";
@@ -37,6 +48,7 @@ namespace ParamIDs
     inline constexpr auto distDrive     = "distDrive";
     inline constexpr auto distMix       = "distMix";
     inline constexpr auto distTone      = "distTone";
+    inline constexpr auto distPosition  = "distPosition";
 
     inline constexpr auto filterAttack  = "filterAttack";
     inline constexpr auto filterDecay   = "filterDecay";
@@ -61,20 +73,25 @@ namespace ParamIDs
     inline constexpr auto unisonDetune  = "unisonDetune";
     inline constexpr auto unisonWidth   = "unisonWidth";
     inline constexpr auto glide         = "glide";
+    inline constexpr auto glideMode     = "glideMode";
+    inline constexpr auto glideCurve    = "glideCurve";
     inline constexpr auto bendRange     = "bendRange";
     inline constexpr auto vibrato       = "vibrato";
 
-    inline constexpr auto chorusMode    = "chorusMode";
-    inline constexpr auto chorusMix     = "chorusMix";
-    inline constexpr auto delaySync     = "delaySync";
-    inline constexpr auto delayTime     = "delayTime";
-    inline constexpr auto delayFeedback = "delayFeedback";
-    inline constexpr auto delayMix      = "delayMix";
-    inline constexpr auto delayTape     = "delayTape";
-    inline constexpr auto reverbSize    = "reverbSize";
-    inline constexpr auto reverbMix     = "reverbMix";
-
     inline constexpr auto masterGain    = "masterGain";
+
+    // Арпеджиатор
+    inline constexpr auto arpOn         = "arpOn";
+    inline constexpr auto arpMode       = "arpMode";
+    inline constexpr auto arpOctaves    = "arpOctaves";
+    inline constexpr auto arpRate       = "arpRate";
+    inline constexpr auto arpGate       = "arpGate";
+    inline constexpr auto arpSwing      = "arpSwing";
+    inline constexpr auto arpHold       = "arpHold";
+
+    // MPE: у каждой ноты свой канал с собственными бендом, давлением и слайдом
+    inline constexpr auto mpeOn         = "mpeOn";
+    inline constexpr auto mpeBendRange  = "mpeBendRange";
 
     // LFO с нуля: "lfo1Shape", "lfo1Rate", "lfo1Sync", "lfo1Mode"...
     juce::String lfoShape (int lfo);
@@ -86,6 +103,11 @@ namespace ParamIDs
     juce::String modSource (int slot);
     juce::String modDest (int slot);
     juce::String modAmount (int slot);
+    juce::String modPolarity (int slot);
+
+    // Рэк эффектов: ручки слота ("fx1p1" ... "fx12p16") и его включение ("fx1On")
+    juce::String fxParam (int slot, int param);
+    juce::String fxOn (int slot);
 }
 
 // Списки вариантов для choice-параметров. Порядок совпадает с enum'ами в DSP-коде;
@@ -93,21 +115,33 @@ namespace ParamIDs
 namespace Choices
 {
     const juce::StringArray& oscShapes();
+    const juce::StringArray& noiseTypes();
     const juce::StringArray& filterModes();
     const juce::StringArray& distTypes();
+    const juce::StringArray& distPositions();
+    const juce::StringArray& glideModes();
+    const juce::StringArray& filterRoutings();
     const juce::StringArray& lfoShapes();
     const juce::StringArray& lfoModes();
     const juce::StringArray& syncDivisions();
     const juce::StringArray& modSources();
     const juce::StringArray& modDestinations();
     const juce::StringArray& voiceModes();
-    const juce::StringArray& chorusModes();
+    const juce::StringArray& modPolarities();
+    const juce::StringArray& arpModes();
+    const juce::StringArray& arpRates();
 }
+
+// Длительность шага арпеджиатора в четвертях (индекс в Choices::arpRates())
+double arpRateInBeats (int index);
 
 // Длительность такта синхронизации в четвертях; 0 для "Free"
 double syncDivisionInBeats (int index);
 
-juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
+class FxRack;
+
+// Параметрам слотов рэка нужен сам рэк: их имена и единицы зависят от эффекта в слоте
+juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout (const FxRack& rack);
 
 // Указатели на значения параметров для чтения из аудиопотока без поиска по строкам
 struct ParameterRefs
@@ -116,23 +150,29 @@ struct ParameterRefs
 
     explicit ParameterRefs (juce::AudioProcessorValueTreeState& state);
 
-    Ref osc1Shape, osc2Shape, osc1WtPos, osc2WtPos, osc2Semi, osc2Fine, oscMix, pulseWidth;
-    Ref subLevel, noiseLevel, fmAmount, ringLevel, foldAmount;
+    std::array<Ref, kNumOscs> oscOn, oscShape, oscWtPos, oscSemi, oscFine, oscPw, oscLevel, oscSync;
+    Ref subLevel, noiseLevel, noiseColor, fmAmount, ringLevel, foldAmount;
 
-    Ref filterMode, cutoff, resonance, drive, vowel, filterEnvAmt, keyTrack, velToCutoff;
-    Ref distType, distDrive, distMix, distTone;
+    std::array<std::array<Ref, (size_t) FilterParam::count>, kNumFilters> filters {};
+    Ref filterRouting;
+    Ref distType, distDrive, distMix, distTone, distPosition;
 
     Ref filterAttack, filterDecay, filterSustain, filterRelease;
     Ref ampAttack, ampDecay, ampSustain, ampRelease, ampVelocity;
 
     std::array<Ref, kNumLfos> lfoShape, lfoRate, lfoSync, lfoMode;
-    std::array<Ref, kNumModSlots> modSource, modDest, modAmount;
+    std::array<Ref, kNumModSlots> modSource, modDest, modAmount, modPolarity;
 
     Ref drift, jitter, spread, sag, warmup, unit;
-    Ref voiceMode, unisonVoices, unisonDetune, unisonWidth, glide, bendRange, vibrato;
+    Ref voiceMode, unisonVoices, unisonDetune, unisonWidth, glide, glideMode, glideCurve, bendRange, vibrato;
 
-    Ref chorusMode, chorusMix, delaySync, delayTime, delayFeedback, delayMix, delayTape, reverbSize, reverbMix;
+    // Рэк эффектов: нормированные (0..1) значения ручек слотов и флаги включения
+    std::array<std::array<Ref, 16>, 12> fxParams;
+    std::array<Ref, 12> fxOn;
     Ref masterGain;
+
+    Ref arpOn, arpMode, arpOctaves, arpRate, arpGate, arpSwing, arpHold;
+    Ref mpeOn, mpeBendRange;
 };
 
 } // namespace sonder

@@ -22,6 +22,15 @@ struct LfoPoint
     float x = 0.0f, y = 0.0f, curve = 0.0f;
 };
 
+// Точки формы без выделения памяти: для аудиопотока
+struct LfoPointSet
+{
+    static constexpr int kMaxPoints = 64;
+
+    int count = 0;
+    std::array<LfoPoint, kMaxPoints> points {};
+};
+
 namespace LfoMath
 {
     // Значение изогнутого сегмента для t в [0, 1]
@@ -35,6 +44,7 @@ namespace LfoMath
 
     // Значение ломаной с изгибами в точке x
     float evaluatePoints (const std::vector<LfoPoint>& points, float x) noexcept;
+    float evaluatePoints (const LfoPoint* points, int count, float x) noexcept;
 
     // Стандартные формы в виде точек: с них начинается редактирование
     std::vector<LfoPoint> pointsForShape (LfoShape shape);
@@ -65,12 +75,18 @@ public:
         return tables[(size_t) lfo][(size_t) activeTable[(size_t) lfo].load (std::memory_order_acquire)].data();
     }
 
+    const LfoPointSet* getPointSet (int lfo) const noexcept
+    {
+        return &pointSets[(size_t) lfo][(size_t) activeTable[(size_t) lfo].load (std::memory_order_acquire)];
+    }
+
 private:
     void rebuildTable (int lfo);
 
     mutable juce::CriticalSection lock;
     std::array<std::vector<LfoPoint>, 8> points;
     std::array<std::array<std::array<float, kTableSize>, 2>, 8> tables {};
+    std::array<std::array<LfoPointSet, 2>, 8> pointSets {};
     std::array<std::atomic<int>, 8> activeTable {};
     std::atomic<int> version { 0 };
 };

@@ -10,8 +10,9 @@ namespace
     const juce::String presetExtension { ".sonderpreset" };
 }
 
-PresetManager::PresetManager (juce::AudioProcessorValueTreeState& s, LfoShapeBank& shapes, WavetableBank& tables)
-    : state (s), lfoShapes (shapes), wavetables (tables)
+PresetManager::PresetManager (juce::AudioProcessorValueTreeState& s, LfoShapeBank& shapes, WavetableBank& tables,
+                              FxRackController& rack)
+    : state (s), lfoShapes (shapes), wavetables (tables), fxRack (rack)
 {
     refresh();
 }
@@ -61,14 +62,33 @@ void PresetManager::load (int index)
     if (! juce::isPositiveAndBelow (index, (int) presets.size()))
         return;
 
+    if (onBeforeLoad != nullptr)
+        onBeforeLoad();
+
     const auto& preset = presets[(size_t) index];
     std::map<juce::String, float> values;
+    std::unique_ptr<juce::XmlElement> xml;
+
+    if (preset.isFactory)
+    {
+        for (const auto& [id, value] : getFactoryPresets()[(size_t) preset.factoryIndex].values)
+            values[id] = value;
+    }
+    else
+    {
+        xml = juce::parseXML (preset.file);
+        if (xml == nullptr)
+            return;
+
+        for (auto* param : xml->getChildWithTagNameIterator ("Param"))
+            values[param->getStringAttribute ("id")] = (float) param->getDoubleAttribute ("value");
+    }
+
+    applyValues (values);
 
     if (preset.isFactory)
     {
         const auto& factory = getFactoryPresets()[(size_t) preset.factoryIndex];
-        for (const auto& [id, value] : factory.values)
-            values[id] = value;
 
         lfoShapes.resetAll();
         wavetables.resetToDefault();
@@ -77,21 +97,31 @@ void PresetManager::load (int index)
             wavetables.select (0, juce::String ("builtin:") + factory.wavetable1);
         if (factory.wavetable2 != nullptr)
             wavetables.select (1, juce::String ("builtin:") + factory.wavetable2);
-    }
-    else if (auto xml = juce::parseXML (preset.file))
-    {
-        for (auto* param : xml->getChildWithTagNameIterator ("Param"))
-            values[param->getStringAttribute ("id")] = (float) param->getDoubleAttribute ("value");
 
-        lfoShapes.fromXml (xml->getChildByName ("LfoShapes"));
-        wavetables.fromXml (xml->getChildByName ("Wavetables"));
+        for (const auto& [lfo, points] : factory.lfoShapes)
+            lfoShapes.setPoints (lfo, points);
+
+        // Рэк эффектов: ручки, не указанные в пресете, остаются по умолчанию
+        fxRack.clear();
+
+        for (const auto& effect : factory.effects)
+        {
+            const int slot = fxRack.addEffect (effect.type);
+            for (const auto& [param, value] : effect.values)
+                fxRack.setRealValue (slot, param, value);
+        }
     }
     else
     {
-        return;
+        lfoShapes.fromXml (xml->getChildByName ("LfoShapes"));
+        wavetables.fromXml (xml->getChildByName ("Wavetables"));
+
+        if (const auto* rack = xml->getChildByName ("FxRack"))
+            fxRack.fromXml (*rack);
+        else
+            fxRack.clear();
     }
 
-    applyValues (values);
     setCurrent (index);
 }
 
@@ -145,7 +175,7 @@ bool PresetManager::saveUserPreset (const juce::String& name)
 
     juce::XmlElement xml ("SonderPreset");
     xml.setAttribute ("name", trimmed);
-    xml.setAttribute ("version", 2);
+    xml.setAttribute ("version", 3);
 
     for (auto* parameter : state.processor.getParameters())
     {
@@ -157,6 +187,7 @@ bool PresetManager::saveUserPreset (const juce::String& name)
         }
     }
 
+    xml.addChildElement (fxRack.toXml().release());
     xml.addChildElement (lfoShapes.toXml().release());
     xml.addChildElement (wavetables.toXml().release());
 

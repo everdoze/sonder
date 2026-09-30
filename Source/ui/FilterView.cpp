@@ -1,7 +1,9 @@
 #include "FilterView.h"
 #include "PluginProcessor.h"
 #include "SonderLookAndFeel.h"
+#include "Theme.h"
 #include "dsp/FormantFilter.h"
+#include "synth/SynthParams.h"
 
 #include <complex>
 
@@ -15,24 +17,9 @@ namespace
     constexpr float kMinFrequency = 20.0f, kMaxFrequency = 20000.0f;
     constexpr float kMinDb = -36.0f, kMaxDb = 24.0f;
 
-    // Линейная модель ladder-фильтра (без насыщения): четыре однополюсных звена с обратной связью
-    Complex ladderResponse (float frequency, float cutoff, float resonance, int mode, float sampleRate)
+    Complex ladderResponse (float frequency, float cutoff, float resonance, LadderFilter::Mode mode, float sampleRate)
     {
-        const float pi = juce::MathConstants<float>::pi;
-        const float g = std::tan (pi * juce::jmin (cutoff, 0.45f * sampleRate) / sampleRate);
-        const float omega = std::tan (pi * juce::jmin (frequency, 0.49f * sampleRate) / sampleRate) / g;
-        const Complex h1 = 1.0f / Complex (1.0f, omega);
-        const float k = 4.5f * resonance;
-        const Complex h2 = h1 * h1, h4 = h2 * h2;
-        const Complex denominator = 1.0f + k * h4;
-
-        switch (mode)
-        {
-            case 1:  return h2 / denominator * (1.0f + 0.2f * k);
-            case 2:  return 2.0f * (h1 - h2) / denominator;
-            case 3:  return std::pow (1.0f - h1, 4.0f) / denominator;
-            default: return h4 / denominator * (1.0f + 0.3f * k);
-        }
+        return LadderFilter::response (frequency, cutoff, resonance, mode, sampleRate);
     }
 
     Complex vowelResponse (float frequency, float cutoff, float resonance, float vowel, float sampleRate)
@@ -56,13 +43,149 @@ namespace
     }
 }
 
-FilterView::FilterView (SonderAudioProcessor& p)
-    : processor (p)
+FilterView::FilterView (SonderAudioProcessor& p, Visuals& v)
+    : processor (p), visuals (v)
 {
-    startTimerHz (30);
+    // Спектр живой: 60 кадров, иначе он заметно дёргается
+    startTimerHz (60);
+}
+
+void FilterView::setSelectedFilter (int filter)
+{
+    selected = juce::jlimit (0, kNumFilters - 1, filter);
+    lastSignature = -1.0;
+    timerCallback();
+}
+
+FilterView::FilterState FilterView::readFilter (int filter) const
+{
+    auto& state = processor.parameters;
+    const auto get = [&] (FilterParam param) { return state.getRawParameterValue (ParamIDs::filterParam (filter, param))->load(); };
+
+    // Пока звучит нота - живые значения из голоса
+    FilterState result;
+    const float liveCutoff = processor.displayCutoff[(size_t) filter].load();
+    result.on = get (FilterParam::on) > 0.5f;
+    result.live = liveCutoff > 0.0f && result.on;
+    result.mode = (int) get (FilterParam::mode);
+    result.resonance = get (FilterParam::resonance);
+    result.cutoff = result.live ? liveCutoff : get (FilterParam::cutoff);
+    result.vowel = result.live ? processor.displayVowel[(size_t) filter].load() : get (FilterParam::vowel);
+    return result;
+}
+
+void FilterView::paintSpectrum (juce::Graphics& g, juce::Rectangle<float> plot)
+{
+    const auto& pre = visuals.getPreFilterSpectrum();
+    const auto& post = visuals.getPostFilterSpectrum();
+
+    float peak = Visuals::kSilenceDb;
+    for (float db : pre)
+        peak = juce::jmax (peak, db);
+
+    if (peak < -90.0f)
+        return;
+
+    // Масштаб общий для обоих спектров: вершина сигнала до фильтра стоит чуть ниже верха экрана.
+    // Подстраивается плавно, чтобы картинка не прыгала от ноты к ноте.
+    const float targetOffset = -6.0f - peak;
+    spectrumOffset += (targetOffset - spectrumOffset) * (targetOffset < spectrumOffset ? 0.3f : 0.025f);
+
+    constexpr float range = 60.0f; // дБ на всю высоту экрана
+    const auto pathFor = [&] (const Visuals::Spectrum& spectrum)
+    {
+        juce::Path path;
+        for (int band = 0; band < Visuals::kNumBands; ++band)
+        {
+            const float x = plot.getX() + plot.getWidth() * ((float) band + 0.5f) / (float) Visuals::kNumBands;
+            const float height = juce::jlimit (0.0f, 1.0f, 1.0f + (spectrum[(size_t) band] + spectrumOffset) / range);
+            const float y = plot.getBottom() - height * plot.getHeight();
+
+            if (band == 0)
+                path.startNewSubPath (plot.getX(), y);
+
+            path.lineTo (x, y);
+        }
+
+        path.lineTo (plot.getRight(), path.getCurrentPosition().y);
+        return path;
+    };
+
+    const auto close = [&plot] (juce::Path path)
+    {
+        path.lineTo (plot.getRight(), plot.getBottom());
+        path.lineTo (plot.getX(), plot.getBottom());
+        path.closeSubPath();
+        return path;
+    };
+
+    const float power = visuals.getPower();
+    const auto prePath = pathFor (pre);
+    const auto postPath = pathFor (post);
+
+    // До фильтра: тусклый силуэт. После: яркая заливка - то, что осталось.
+    g.setColour (Palette::textFaint.withAlpha (0.22f * power));
+    g.fillPath (close (prePath));
+    g.setColour (Palette::textFaint.withAlpha (0.6f * power));
+    g.strokePath (prePath, juce::PathStrokeType (1.0f));
+
+    g.setGradientFill (juce::ColourGradient (visuals.trace().withAlpha (0.42f * power), 0.0f, plot.getY(),
+                                             visuals.trace().withAlpha (0.10f * power), 0.0f, plot.getBottom(), false));
+    g.fillPath (close (postPath));
+}
+
+void FilterView::timerCallback()
+{
+    const auto& settings = Settings::get();
+
+    if (settings.spectrum && isVisible())
+        visuals.updateFilterSpectra();
+
+    // Что сейчас на экране: кривые, спектр, настройки вида. Если ничего не поменялось, кадр не нужен.
+    const bool shaders = shader.isAvailable() && Visuals::wantsShaders (*this);
+    double signature = (shaders ? 1.0e7 : 0.0) + (settings.spectrum ? 2.0e7 : 0.0) + (settings.crtScreen ? 4.0e7 : 0.0)
+                     + (double) Palette::accent.getARGB() * 1.0e-3 + selected * 3.0e5
+                     + processor.parameters.getRawParameterValue (ParamIDs::filterRouting)->load() * 7.0e5;
+
+    for (int f = 0; f < kNumFilters; ++f)
+    {
+        const auto filter = readFilter (f);
+        signature += (f + 1) * (filter.cutoff + 1000.0 * filter.resonance + 3000.0 * filter.mode
+                                + 5000.0 * filter.vowel + (filter.on ? 9.0e4 : 0.0));
+    }
+
+    if (settings.spectrum)
+        for (size_t band = 0; band < Visuals::kNumBands; ++band)
+            signature += (double) (visuals.getPreFilterSpectrum()[band] * 0.37f + visuals.getPostFilterSpectrum()[band]) * (double) (band + 1);
+
+    if (std::abs (signature - lastSignature) < 1.0e-4)
+    {
+        // Кадр не менялся, но результат шейдеров мог прийти с опозданием: забираем его
+        if (shader.flush())
+            repaint();
+
+        return;
+    }
+
+    lastSignature = signature;
+
+    if (shaders)
+        shader.render (*this, visuals.screenFx(), [this] (juce::Graphics& g) { paintScreen (g, true); });
+    else
+        shader.invalidate();
+
+    repaint();
 }
 
 void FilterView::paint (juce::Graphics& g)
+{
+    if (! shader.draw (g, getLocalBounds().toFloat()))
+        paintScreen (g, false);
+
+    paintLabels (g);
+}
+
+void FilterView::paintScreen (juce::Graphics& g, bool forShader)
 {
     const auto bounds = getLocalBounds().toFloat().reduced (1.0f);
     g.setColour (Palette::deep);
@@ -101,63 +224,125 @@ void FilterView::paint (juce::Graphics& g)
         g.drawHorizontalLine (juce::roundToInt (yFor (db)), plot.getX(), plot.getRight());
     }
 
-    // Параметры: пока звучит нота - живые значения из голоса
-    auto& state = processor.parameters;
-    const int mode = (int) state.getRawParameterValue (ParamIDs::filterMode)->load();
-    const float resonance = state.getRawParameterValue (ParamIDs::resonance)->load();
-    const float liveCutoff = processor.displayCutoff.load();
-    const bool live = liveCutoff > 0.0f;
-    const float cutoff = live ? liveCutoff : state.getRawParameterValue (ParamIDs::cutoff)->load();
-    const float vowel = live ? processor.displayVowel.load() : state.getRawParameterValue (ParamIDs::vowel)->load();
-    const float sampleRate = processor.scope.sampleRate.load() * 2.0f;
+    if (Settings::get().spectrum)
+        paintSpectrum (g, plot);
 
-    juce::Path curve;
+    // Каждый фильтр и то, что получается вместе
+    std::array<FilterState, kNumFilters> filters;
+    for (int f = 0; f < kNumFilters; ++f)
+        filters[(size_t) f] = readFilter (f);
+
+    const float sampleRate = processor.scope.sampleRate.load() * 2.0f;
+    const bool parallel = processor.parameters.getRawParameterValue (ParamIDs::filterRouting)->load() > 0.5f;
+    const int numOn = (int) std::count_if (filters.begin(), filters.end(), [] (const FilterState& f) { return f.on; });
+
+    const auto responseOf = [&] (const FilterState& filter, float frequency)
+    {
+        return filter.mode == kVowelFilterMode ? vowelResponse (frequency, filter.cutoff, filter.resonance, filter.vowel, sampleRate)
+                                               : ladderResponse (frequency, filter.cutoff, filter.resonance,
+                                                                 ladderModeForIndex (filter.mode), sampleRate);
+    };
+
     const int steps = juce::jmax (64, (int) plot.getWidth() / 2);
+    juce::Path combined;
+    std::array<juce::Path, kNumFilters> single;
+
     for (int i = 0; i <= steps; ++i)
     {
         const float frequency = kMinFrequency * std::pow (kMaxFrequency / kMinFrequency, (float) i / (float) steps);
-        const Complex response = mode == 4 ? vowelResponse (frequency, cutoff, resonance, vowel, sampleRate)
-                                           : ladderResponse (frequency, cutoff, resonance, mode, sampleRate);
-        const float db = juce::Decibels::gainToDecibels (std::abs (response), -60.0f);
-        const juce::Point<float> p (xFor (frequency), yFor (db));
+        const float x = xFor (frequency);
 
+        Complex total = parallel && numOn > 1 ? Complex (0.0f) : Complex (1.0f);
+
+        for (int f = 0; f < kNumFilters; ++f)
+        {
+            if (! filters[(size_t) f].on)
+                continue;
+
+            const auto response = responseOf (filters[(size_t) f], frequency);
+            total = parallel && numOn > 1 ? total + 0.5f * response : total * response;
+
+            const float y = yFor (juce::Decibels::gainToDecibels (std::abs (response), -60.0f));
+            if (i == 0)
+                single[(size_t) f].startNewSubPath (x, y);
+            else
+                single[(size_t) f].lineTo (x, y);
+        }
+
+        const float y = yFor (juce::Decibels::gainToDecibels (std::abs (total), -60.0f));
         if (i == 0)
-            curve.startNewSubPath (p);
+            combined.startNewSubPath (x, y);
         else
-            curve.lineTo (p);
+            combined.lineTo (x, y);
     }
 
-    auto fill = curve;
+    // Отдельные фильтры - тонкими линиями, когда включены оба
+    if (numOn > 1)
+    {
+        for (int f = 0; f < kNumFilters; ++f)
+        {
+            g.setColour (Palette::accent.withAlpha (f == selected ? 0.75f : 0.35f));
+            g.strokePath (single[(size_t) f], juce::PathStrokeType (1.0f));
+        }
+    }
+
+    auto fill = combined;
     fill.lineTo (plot.getRight(), plot.getBottom());
     fill.lineTo (plot.getX(), plot.getBottom());
     fill.closeSubPath();
-    g.setGradientFill (juce::ColourGradient (Palette::accent.withAlpha (0.25f), 0.0f, plot.getY(),
+    // Со спектром заливка под кривой почти прозрачная, иначе его не видно
+    const float fillAlpha = Settings::get().spectrum ? 0.10f : 0.25f;
+    g.setGradientFill (juce::ColourGradient (Palette::accent.withAlpha (fillAlpha), 0.0f, plot.getY(),
                                              Palette::accent.withAlpha (0.02f), 0.0f, plot.getBottom(), false));
     g.fillPath (fill);
 
-    g.setColour (Palette::accent.withAlpha (0.14f));
-    g.strokePath (curve, { 6.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded });
-    g.setColour (Palette::accentBright);
-    g.strokePath (curve, { 1.6f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded });
-
-    // Метка среза
-    if (mode != 4)
+    if (! forShader)
     {
-        const float x = xFor (juce::jlimit (kMinFrequency, kMaxFrequency, cutoff));
+        g.setColour (Palette::accent.withAlpha (0.14f));
+        g.strokePath (combined, { 6.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded });
+    }
+
+    g.setColour (numOn > 0 ? Palette::accentBright : Palette::textFaint);
+    g.strokePath (combined, { 1.6f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded });
+
+    // Метка среза выбранного фильтра
+    const auto& current = filters[(size_t) selected];
+    if (current.on && current.mode != kVowelFilterMode)
+    {
+        const float x = xFor (juce::jlimit (kMinFrequency, kMaxFrequency, current.cutoff));
         g.setColour (Palette::accent.withAlpha (0.35f));
         g.fillRect (juce::Rectangle<float> (x - 0.5f, plot.getY(), 1.0f, plot.getHeight()));
     }
 
-    // Подпись
-    auto caption = Choices::filterModes()[mode].toUpperCase() + "   ";
-    caption += cutoff < 1000.0f ? juce::String (juce::roundToInt (cutoff)) + " Hz" : juce::String (cutoff / 1000.0f, 2) + " kHz";
-    if (mode == 4)
+    if (! forShader)
+        glass.draw (g, bounds);
+}
+
+void FilterView::paintLabels (juce::Graphics& g)
+{
+    const auto bounds = getLocalBounds().toFloat().reduced (1.0f);
+    const auto filter = readFilter (selected);
+
+    auto caption = "F" + juce::String (selected + 1) + "   ";
+
+    if (! filter.on)
     {
-        static const char* vowels[] { "A", "E", "I", "O", "U" };
-        caption += "   " + juce::String (vowels[juce::jlimit (0, 4, juce::roundToInt (vowel * 4.0f))]);
+        caption += "OFF";
+    }
+    else
+    {
+        caption += Choices::filterModes()[filter.mode].toUpperCase() + "   ";
+        caption += filter.cutoff < 1000.0f ? juce::String (juce::roundToInt (filter.cutoff)) + " Hz"
+                                           : juce::String (filter.cutoff / 1000.0f, 2) + " kHz";
+
+        if (filter.mode == kVowelFilterMode)
+        {
+            static const char* vowels[] { "A", "E", "I", "O", "U" };
+            caption += "   " + juce::String (vowels[juce::jlimit (0, 4, juce::roundToInt (filter.vowel * 4.0f))]);
+        }
     }
 
-    g.setColour (live ? Palette::accentBright : Palette::textDim);
+    g.setColour (filter.live ? Palette::accentBright : Palette::textDim);
     g.setFont (makeFont (10.5f, true, 0.08f));
     g.drawText (caption, bounds.reduced (10.0f, 6.0f), juce::Justification::topLeft);
 

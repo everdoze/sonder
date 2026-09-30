@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <complex>
 
 namespace sonder
 {
@@ -15,7 +16,29 @@ namespace sonder
 class LadderFilter
 {
 public:
-    enum class Mode { lowpass24, lowpass12, bandpass, highpass };
+    enum class Mode { lowpass24, lowpass12, bandpass12, highpass24, highpass12, bandpass24, notch };
+
+    // Выход как смесь входа петли (a) и выходов четырёх звеньев (b..e), плюс компенсация резонанса
+    struct Mix
+    {
+        float a, b, c, d, e, resonanceCompensation;
+    };
+
+    static constexpr Mix mixFor (Mode mode) noexcept
+    {
+        switch (mode)
+        {
+            case Mode::lowpass24:  return { 0.0f,  0.0f, 0.0f,  0.0f, 1.0f, 0.3f };
+            case Mode::lowpass12:  return { 0.0f,  0.0f, 1.0f,  0.0f, 0.0f, 0.2f };
+            case Mode::bandpass12: return { 0.0f,  2.0f, -2.0f, 0.0f, 0.0f, 0.0f };
+            case Mode::highpass24: return { 1.0f, -4.0f, 6.0f, -4.0f, 1.0f, 0.0f };
+            case Mode::highpass12: return { 1.0f, -2.0f, 1.0f,  0.0f, 0.0f, 0.0f };
+            case Mode::bandpass24: return { 0.0f,  0.0f, 4.0f, -8.0f, 4.0f, 0.0f };
+            case Mode::notch:      return { 1.0f, -2.0f, 2.0f,  0.0f, 0.0f, 0.0f };
+        }
+
+        return { 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.3f };
+    }
 
     struct Coefficients
     {
@@ -37,6 +60,22 @@ public:
 
     void reset() noexcept { s1 = s2 = s3 = s4 = 0.0f; }
 
+    // Линейная модель (без насыщения) для экранов: комплексный коэффициент передачи на частоте frequency
+    static std::complex<float> response (float frequency, float cutoff, float resonance, Mode mode, float sampleRate) noexcept
+    {
+        using Complex = std::complex<float>;
+        const float pi = 3.14159265f;
+        const float g = std::tan (pi * std::fmin (cutoff, 0.45f * sampleRate) / sampleRate);
+        const float omega = std::tan (pi * std::fmin (frequency, 0.49f * sampleRate) / sampleRate) / g;
+        const Complex h1 = 1.0f / Complex (1.0f, omega);
+        const float k = 4.5f * resonance;
+        const Complex h2 = h1 * h1, h3 = h2 * h1, h4 = h2 * h2;
+
+        const auto m = mixFor (mode);
+        const Complex mixed = m.a + m.b * h1 + m.c * h2 + m.d * h3 + m.e * h4;
+        return mixed / (1.0f + k * h4) * (1.0f + m.resonanceCompensation * k);
+    }
+
     // inputGain: усиление перед нелинейностью (драйв)
     float process (float x, const Coefficients& c, float inputGain, Mode mode) noexcept
     {
@@ -56,17 +95,10 @@ public:
         const float y3 = onePole (y2, s3, G);
         const float y4 = onePole (y3, s4, G);
 
-        switch (mode)
-        {
-            // Частичная компенсация падения басов на высоком резонансе. Делается на выходе:
-            // если усилить вход, tanh насытится сильнее и "съест" резонанс
-            case Mode::lowpass24: return y4 * (1.0f + 0.3f * c.k);
-            case Mode::lowpass12: return y2 * (1.0f + 0.2f * c.k);
-            case Mode::bandpass:  return 2.0f * (y1 - y2);
-            case Mode::highpass:  return u - 4.0f * y1 + 6.0f * y2 - 4.0f * y3 + y4;
-        }
-
-        return y4;
+        // Частичная компенсация падения басов на высоком резонансе у LP делается на выходе:
+        // если усилить вход, tanh насытится сильнее и "съест" резонанс
+        const auto m = mixFor (mode);
+        return (m.a * u + m.b * y1 + m.c * y2 + m.d * y3 + m.e * y4) * (1.0f + m.resonanceCompensation * c.k);
     }
 
 private:

@@ -1,15 +1,16 @@
 #include "PluginEditor.h"
+#include "ui/Theme.h"
 
 SonderAudioProcessorEditor::SonderAudioProcessorEditor (SonderAudioProcessor& p)
     : AudioProcessorEditor (&p),
-      view (p, p.wrapperType == juce::AudioProcessor::wrapperType_Standalone)
+      synth (p)
 {
     juce::LookAndFeel::setDefaultLookAndFeel (&lookAndFeel);
     setLookAndFeel (&lookAndFeel);
-    addAndMakeVisible (view);
+    rebuildView();
 
     const int designWidth = sonder::ui::MainView::kWidth;
-    const int designHeight = view.getDesignHeight();
+    const int designHeight = view->getDesignHeight();
 
     // Стартовый масштаб: не больше экрана
     double scale = 1.0;
@@ -25,8 +26,35 @@ SonderAudioProcessorEditor::SonderAudioProcessorEditor (SonderAudioProcessor& p)
 
 SonderAudioProcessorEditor::~SonderAudioProcessorEditor()
 {
+    view.reset();
     setLookAndFeel (nullptr);
     juce::LookAndFeel::setDefaultLookAndFeel (nullptr);
+}
+
+void SonderAudioProcessorEditor::rebuildView()
+{
+    view.reset();
+
+    sonder::ui::applyTheme (sonder::ui::Settings::get());
+    lookAndFeel.applyPalette();
+
+    view = std::make_unique<sonder::ui::MainView> (synth, synth.wrapperType == juce::AudioProcessor::wrapperType_Standalone);
+    view->onThemeChanged = [this]
+    {
+        // Меню, из которого пришла команда, ещё на стеке: пересоздаём окно следующим сообщением
+        juce::MessageManager::callAsync ([safeThis = juce::Component::SafePointer<SonderAudioProcessorEditor> (this)]
+        {
+            if (safeThis != nullptr)
+                safeThis->rebuildView();
+        });
+    };
+
+    addAndMakeVisible (*view);
+
+    if (getWidth() > 0)
+        resized();
+
+    repaint();
 }
 
 void SonderAudioProcessorEditor::paint (juce::Graphics& g)
@@ -36,7 +64,10 @@ void SonderAudioProcessorEditor::paint (juce::Graphics& g)
 
 void SonderAudioProcessorEditor::resized()
 {
+    if (view == nullptr)
+        return;
+
     const float scale = (float) getWidth() / (float) sonder::ui::MainView::kWidth;
-    view.setBounds (0, 0, sonder::ui::MainView::kWidth, view.getDesignHeight());
-    view.setTransform (juce::AffineTransform::scale (scale));
+    view->setBounds (0, 0, sonder::ui::MainView::kWidth, view->getDesignHeight());
+    view->setTransform (juce::AffineTransform::scale (scale));
 }

@@ -1,4 +1,5 @@
 #include "SonderLookAndFeel.h"
+#include "Theme.h"
 
 namespace sonder::ui
 {
@@ -10,6 +11,11 @@ juce::Font makeFont (float height, bool bold, float kerning)
 }
 
 SonderLookAndFeel::SonderLookAndFeel()
+{
+    applyPalette();
+}
+
+void SonderLookAndFeel::applyPalette()
 {
     setColour (juce::ResizableWindow::backgroundColourId, Palette::background);
 
@@ -65,6 +71,12 @@ void SonderLookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, int w
     const float size = juce::jmin (bounds.getWidth(), bounds.getHeight());
     const auto centre = bounds.getCentre();
 
+    const auto& properties = slider.getProperties();
+
+    // Пока ручка плавно едет к значению нового пресета, рисуем её промежуточное положение
+    if (const float animated = properties.getWithDefault ("animPos", -1.0f); animated >= 0.0f)
+        sliderPos = animated;
+
     const float arcRadius = size * 0.5f - 4.0f;
     const float lineWidth = juce::jmax (2.5f, size * 0.055f);
     const float angle = rotaryStartAngle + sliderPos * (rotaryEndAngle - rotaryStartAngle);
@@ -92,11 +104,29 @@ void SonderLookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, int w
     }
 
     // Модуляция: кольцо диапазона между дорожкой и корпусом и точка живого значения
-    const auto& properties = slider.getProperties();
     if ((bool) properties.getWithDefault ("modActive", false))
     {
         const float ringRadius = arcRadius - lineWidth * 0.5f - 2.2f;
         const auto angleFor = [&] (float normalised) { return rotaryStartAngle + normalised * (rotaryEndAngle - rotaryStartAngle); };
+
+        // Дуга "дышит": светящийся отрезок от положения ручки до живого значения
+        if (const float live = properties.getWithDefault ("modLive", -1.0f); live >= 0.0f && Settings::get().motion)
+        {
+            const float liveAngle = angleFor (live);
+
+            if (std::abs (liveAngle - angle) > 0.02f)
+            {
+                juce::Path breath;
+                breath.addCentredArc (centre.x, centre.y, arcRadius, arcRadius, 0.0f,
+                                      juce::jmin (angle, liveAngle), juce::jmax (angle, liveAngle), true);
+
+                const float strength = juce::jmin (1.0f, std::abs (live - sliderPos) * 4.0f);
+                g.setColour (Palette::accentBright.withAlpha (0.10f + 0.16f * strength));
+                g.strokePath (breath, { lineWidth * 3.2f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded });
+                g.setColour (Palette::accentBright.withAlpha (0.55f));
+                g.strokePath (breath, { lineWidth, juce::PathStrokeType::curved, juce::PathStrokeType::rounded });
+            }
+        }
         const float a0 = angleFor ((float) properties.getWithDefault ("modMin", 0.0f));
         const float a1 = angleFor ((float) properties.getWithDefault ("modMax", 0.0f));
 
@@ -106,6 +136,21 @@ void SonderLookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, int w
             ring.addCentredArc (centre.x, centre.y, ringRadius, ringRadius, 0.0f, juce::jmin (a0, a1), juce::jmax (a0, a1), true);
             g.setColour (Palette::accentBright.withAlpha (0.85f));
             g.strokePath (ring, { 1.8f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded });
+        }
+
+        // Модулятор, который сейчас редактируется Alt+drag, выделен белой дугой поверх общего диапазона
+        if ((bool) properties.getWithDefault ("modEdit", false))
+        {
+            const float e0 = angleFor ((float) properties.getWithDefault ("modEditMin", 0.0f));
+            const float e1 = angleFor ((float) properties.getWithDefault ("modEditMax", 0.0f));
+
+            if (std::abs (e1 - e0) > 0.02f)
+            {
+                juce::Path edit;
+                edit.addCentredArc (centre.x, centre.y, ringRadius, ringRadius, 0.0f, juce::jmin (e0, e1), juce::jmax (e0, e1), true);
+                g.setColour (juce::Colours::white);
+                g.strokePath (edit, { 2.6f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded });
+            }
         }
 
         const float live = properties.getWithDefault ("modLive", -1.0f);

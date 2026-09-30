@@ -40,6 +40,7 @@ target_sources(Sonder
         Source/dsp/LadderFilter.h
         Source/dsp/LfoShapes.cpp
         Source/dsp/LfoShapes.h
+        Source/dsp/NoiseGenerator.h
         Source/dsp/PolyBlepOscillator.h
         Source/dsp/Saturation.h
         Source/dsp/SmoothNoise.h
@@ -48,34 +49,75 @@ target_sources(Sonder
         Source/dsp/WavetableBank.cpp
         Source/dsp/WavetableBank.h
         Source/fx/Chorus.h
+        Source/fx/Compressor.h
+        Source/fx/Equalizer.h
+        Source/fx/FilterFx.h
+        Source/fx/Flanger.h
+        Source/fx/FreqShifter.h
+        Source/fx/FxChain.h
+        Source/fx/FxRack.h
+        Source/fx/FxRackController.cpp
+        Source/fx/FxRackController.h
+        Source/fx/FxTypes.cpp
+        Source/fx/FxTypes.h
+        Source/fx/Limiter.h
+        Source/fx/MasterDistortion.h
+        Source/fx/Multiband.h
+        Source/fx/Phaser.h
+        Source/fx/Reverb.h
         Source/fx/TapeDelay.h
+        Source/fx/Tremolo.h
+        Source/fx/Widener.h
         Source/presets/FactoryPresets.cpp
         Source/presets/FactoryPresets.h
         Source/presets/PresetManager.cpp
         Source/presets/PresetManager.h
+        Source/synth/Arpeggiator.cpp
+        Source/synth/Arpeggiator.h
+        Source/synth/ModRouting.h
         Source/synth/SynthParams.h
+        Source/synth/Tuning.cpp
+        Source/synth/Tuning.h
         Source/synth/Voice.cpp
         Source/synth/Voice.h
         Source/synth/VoiceManager.cpp
         Source/synth/VoiceManager.h
         Source/ui/Controls.cpp
         Source/ui/Controls.h
+        Source/ui/EffectView.cpp
+        Source/ui/EffectView.h
+        Source/ui/FilterPanel.cpp
+        Source/ui/FilterPanel.h
         Source/ui/FilterView.cpp
         Source/ui/FilterView.h
+        Source/ui/FxRackView.cpp
+        Source/ui/FxRackView.h
         Source/ui/LfoEditor.cpp
         Source/ui/LfoEditor.h
         Source/ui/LfoPanel.cpp
         Source/ui/LfoPanel.h
         Source/ui/MainView.cpp
+        Source/ui/OffscreenGl.cpp
+        Source/ui/OffscreenGl.h
         Source/ui/MainView.h
+        Source/ui/OscPanel.cpp
+        Source/ui/OscPanel.h
         Source/ui/OscillatorView.cpp
         Source/ui/OscillatorView.h
+        Source/ui/PlayPanels.cpp
+        Source/ui/PlayPanels.h
         Source/ui/PresetBar.cpp
         Source/ui/PresetBar.h
         Source/ui/ScopeView.cpp
         Source/ui/ScopeView.h
         Source/ui/SonderLookAndFeel.cpp
-        Source/ui/SonderLookAndFeel.h)
+        Source/ui/ShaderStage.cpp
+        Source/ui/ShaderStage.h
+        Source/ui/SonderLookAndFeel.h
+        Source/ui/Theme.cpp
+        Source/ui/Theme.h
+        Source/ui/Visuals.cpp
+        Source/ui/Visuals.h)
 
 target_include_directories(Sonder PRIVATE Source)
 
@@ -89,6 +131,7 @@ target_link_libraries(Sonder
     PRIVATE
         juce::juce_audio_utils
         juce::juce_dsp
+        juce::juce_opengl
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags

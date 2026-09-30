@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Parameters.h"
 #include "Wavetable.h"
 
 #include <atomic>
@@ -8,13 +9,13 @@
 namespace sonder
 {
 
-// Выбор wavetable для двух осцилляторов. Выбор меняет UI (message thread);
+// Выбор wavetable для каждого осциллятора. Выбор меняет UI (message thread);
 // аудиопоток читает сырой указатель. Загруженные таблицы живут в кэше до конца работы,
 // поэтому указатель в аудиопотоке никогда не становится висячим.
 class WavetableBank
 {
 public:
-    static constexpr int kNumOscillators = 2;
+    static constexpr int kNumOscillators = kNumOscs;
 
     WavetableBank();
 
