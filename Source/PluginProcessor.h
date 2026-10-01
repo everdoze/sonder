@@ -142,6 +142,15 @@ private:
     std::array<std::array<float, kMaxLatencyPad>, 2> padBuffer {};
     void applyLatencyPad (juce::AudioBuffer<float>& buffer) noexcept;
 
+    // Сон при простое: нет нот, нет голосов, а выход уже kSleepAfterSeconds тише kSilenceLevel
+    // (хвосты реверба и дилея успели затихнуть) - блок не считается, на выходе тишина.
+    // Любое MIDI-событие будит сразу.
+    static constexpr double kSleepAfterSeconds = 1.0;
+    static constexpr float kSilenceLevel = 3.16e-5f; // -90 dB: ниже шипения хоруса, тише слышимого
+    double silentSeconds = 0.0;
+    bool sleeping (const juce::MidiBuffer& midi) const noexcept;
+    void sleepThrough (int numSamples, const sonder::SynthParams& synthParams);
+
     // Просадка питания: огибающая громкости, прогрев: время с "включения"
     float sagEnvelope = 0.0f;
     float coldAmount = 0.0f, sagAmount = 0.0f;

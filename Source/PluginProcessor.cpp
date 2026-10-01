@@ -63,6 +63,8 @@ void SonderAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock
     for (auto& channel : padBuffer)
         channel.fill (0.0f);
 
+    silentSeconds = 0.0;
+
     // Синтез идёт на повышенной частоте: меньше алиасинга от нелинейностей, эффекты на обычной
     const auto factor = (int) oversampling->getOversamplingFactor();
     oversampledRate = sampleRate * factor;
@@ -223,6 +225,12 @@ void SonderAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
 
     masterGain.setTargetValue (juce::Decibels::decibelsToGain (params.masterGain->load() - kOutputStageDb));
 
+    if (sleeping (midi))
+    {
+        sleepThrough (numSamples, synthParams);
+        return;
+    }
+
     // Хост может прислать блок больше заявленного в prepareToPlay, режем на куски
     for (int start = 0; start < numSamples; start += maxBlockSize)
     {
@@ -232,6 +240,36 @@ void SonderAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
     }
 
     applyLatencyPad (buffer);
+    updateDisplayState (synthParams);
+
+    // Сколько уже длится тишина на выходе без звучащих голосов
+    const float peak = juce::jmax (buffer.getMagnitude (0, 0, numSamples), buffer.getMagnitude (1, 0, numSamples));
+    if (peak < kSilenceLevel && voiceManager.getActiveVoiceMask() == 0)
+        silentSeconds += numSamples / currentSampleRate;
+    else
+        silentSeconds = 0.0;
+}
+
+bool SonderAudioProcessor::sleeping (const juce::MidiBuffer& midi) const noexcept
+{
+    return silentSeconds >= kSleepAfterSeconds && midi.isEmpty() && voiceManager.getActiveVoiceMask() == 0;
+}
+
+void SonderAudioProcessor::sleepThrough (int numSamples, const sonder::SynthParams& synthParams)
+{
+    // Время идёт как обычно: прогрев остывает, свободные LFO крутятся - после пробуждения всё на своих местах
+    updateAnalogState (numSamples);
+
+    for (int l = 0; l < sonder::kNumLfos; ++l)
+    {
+        auto& lfo = globalLfos[(size_t) l];
+        const double advanced = lfo.phase + (double) synthParams.lfos[(size_t) l].rateHz * numSamples / currentSampleRate;
+        const double whole = std::floor (advanced);
+        lfo.phase = advanced - whole;
+        lfo.cycle += (uint32_t) whole;
+    }
+
+    masterGain.skip (numSamples);
     updateDisplayState (synthParams);
 }
 

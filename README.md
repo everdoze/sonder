@@ -41,7 +41,7 @@ On top of that, the oscillators are free-running and never reset phase on a new 
 - Noise in six colours: White, Pink, Brown, vinyl Crackle, tape Hiss and pitch-tracked Digital. The **Color** knob morphs smoothly between neighbours, and an LFO or envelope can sweep it
 - Up to 4 unison layers with detune and stereo width
 - **Glide** with a curve from slow start through linear to fast start, and a mode: on every note, only between overlapping notes, or Auto (overlapping only in Legato voice mode)
-- **Sound quality** per instance (view menu next to SAVE): Eco runs the voices at the host rate for about half the CPU, Normal at 2x, High at 4x. Offline renders switch to High automatically. Saved with the project, not with presets; the latency reported to the host is the same in every mode
+- **Sound quality** per instance (view menu next to SAVE): Eco runs the voices at the host rate for about half the CPU, Normal at 2x, High at 4x. Offline renders switch to High automatically. An idle instance (no notes, effect tails faded out) goes to sleep and costs almost nothing until the next MIDI event. Saved with the project, not with presets; the latency reported to the host is the same in every mode
 
 **Filters**
 - Two filters, in series or in parallel. The second one is off until you need it
@@ -157,7 +157,9 @@ Synthesis runs at twice the sample rate; effects run at the normal rate. LFOs ar
 
 ## License
 
-Sonder is built with [JUCE](https://juce.com) and uses it under the [JUCE 9 Starter licence](https://juce.com/legal/juce-9-licence/).
+Sonder is free software: you can redistribute it and/or modify it under the terms of the [GNU General Public License v3](LICENSE) as published by the Free Software Foundation. It comes with no warranty; see the licence for details.
+
+Sonder is built with [JUCE](https://juce.com), which is used under its open-source licence, the [GNU AGPLv3](https://www.gnu.org/licenses/agpl-3.0.html) (GPLv3 and AGPLv3 code may be combined, section 13 of both licences).
 
 VST is a registered trademark of Steinberg Media Technologies GmbH.
 
