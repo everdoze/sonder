@@ -30,7 +30,7 @@ namespace
         {
             auto fx = Visuals::staticScreenFx (false);
             fx.cornerRadius = 5.0f;
-            shader.render (owner, fx, std::forward<Paint> (paint), true);
+            shader.render (owner, fx, std::forward<Paint> (paint), true, ShaderScreen::Detail::native);
         }
         else
         {

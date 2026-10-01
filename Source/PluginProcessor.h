@@ -58,6 +58,10 @@ public:
 
     // Шкалы ручек для модуляции "в долях хода" (цель -> шкала её ручки)
     const sonder::DestRanges& getDestRanges() const noexcept { return destRanges; }
+
+    // Указатели на значения параметров: интерфейсу, который опрашивает матрицу модуляции на каждом кадре,
+    // не нужно каждый раз искать параметр по строке
+    const sonder::ParameterRefs& getParameterRefs() const noexcept { return params; }
     const sonder::Arpeggiator& getArpeggiator() const noexcept { return arpeggiator; }
 
     // Для интерфейса: какие голоса звучат, фазы LFO, текущий срез фильтра
@@ -78,8 +82,18 @@ public:
     std::atomic<float> displayBpm { 120.0f };
     const sonder::FxChain& getFxChain() const noexcept { return fxChain; }
 
+    // Качество: голоса считаются на частоте ×1 (Eco), ×2 (Normal) или ×4 (High).
+    // Хранится в проекте, а не в пресете: это вопрос нагрузки на процессор, а не тембра
+    // При рендере в файл (хост включил offline-режим) голоса всегда считаются в High.
+    // Задержка, которую видит хост, от качества не зависит: меньшие качества добирают её до High сами,
+    // поэтому переключение (и переход к рендеру) не сдвигает звук по времени
+    enum class Quality { eco, normal, high };
+    Quality getQuality() const noexcept { return static_cast<Quality> (quality.load()); }
+    void setQuality (Quality newQuality);
+    Quality getRenderingQuality() const noexcept { return isNonRealtime() ? Quality::high : getQuality(); }
+    void setNonRealtime (bool offline) noexcept override;
+
 private:
-    static constexpr int kOversamplingOrder = 1; // 2^1 = 2x
 
     struct Transport
     {
@@ -118,6 +132,15 @@ private:
     juce::SmoothedValue<float> masterGain;
     double currentSampleRate = 44100.0, oversampledRate = 88200.0;
     int maxBlockSize = 0;
+    std::atomic<int> quality { (int) Quality::normal };
+    int preparedQuality = -1;
+    void applyQuality();
+
+    // Добавочная задержка до задержки High (см. Quality)
+    static constexpr int kMaxLatencyPad = 16;
+    int latencyPad = 0, padPosition = 0;
+    std::array<std::array<float, kMaxLatencyPad>, 2> padBuffer {};
+    void applyLatencyPad (juce::AudioBuffer<float>& buffer) noexcept;
 
     // Просадка питания: огибающая громкости, прогрев: время с "включения"
     float sagEnvelope = 0.0f;

@@ -54,6 +54,14 @@ private:
     float displayGain = 1.0f;
     bool signalPresent = false;
 
+    // Режим WAVE: первый период прошлого кадра - следующий кадр выравнивается по нему
+    static constexpr int kShapePoints = 64;
+    std::array<float, kShapePoints> previousShape {};
+    float previousNominal = 0.0f;
+    bool havePreviousShape = false;
+    float cachedPeriod = 0.0f, periodNominal = 0.0f;
+    int periodCountdown = 0;
+
     // Послесвечение: прошлые кадры гаснут в отдельной картинке (программной - её гасит процессор);
     // окно рисует её родную копию, иначе Direct2D каждый кадр создавал бы картинку заново
     juce::Image trail, trailShown;

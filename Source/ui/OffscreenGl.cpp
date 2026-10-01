@@ -71,14 +71,26 @@ OffscreenGl::~OffscreenGl()
 
 OffscreenGl::Scope::Scope (OffscreenGl& context)
 {
+    const HGLRC current = wglGetCurrentContext();
+    if (current == (HGLRC) context.renderContext)
+    {
+        alreadyCurrent = true;
+        return;
+    }
+
     previousDevice = wglGetCurrentDC();
-    previousContext = wglGetCurrentContext();
+    previousContext = current;
     wglMakeCurrent ((HDC) context.deviceContext, (HGLRC) context.renderContext);
 }
 
 OffscreenGl::Scope::~Scope()
 {
-    wglMakeCurrent ((HDC) previousDevice, (HGLRC) previousContext);
+    // Чужой контекст возвращаем на место. Если до нас текущего контекста не было, наш остаётся:
+    // переключение контекста на некоторых драйверах стоит долей миллисекунды, а экранов несколько
+    // и они обновляются десятки раз в секунду. Чужому коду это не мешает: рисуя через OpenGL,
+    // он сначала делает текущим свой контекст.
+    if (! alreadyCurrent && previousContext != nullptr)
+        wglMakeCurrent ((HDC) previousDevice, (HGLRC) previousContext);
 }
 
 } // namespace sonder::ui

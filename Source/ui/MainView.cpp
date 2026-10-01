@@ -232,7 +232,7 @@ MainView::MainView (SonderAudioProcessor& p, bool keyboardVisible)
         addAndMakeVisible (button);
     }
 
-    viewButton.setTooltip ("Theme, accent colour and visual effects");
+    viewButton.setTooltip ("Theme, accent colour, visual effects and sound quality");
     viewButton.onClick = [this] { showViewMenu(); };
 
     addAndMakeVisible (presetBar);
@@ -337,10 +337,7 @@ void MainView::timerCallback()
         if (const auto it = controlsById.find (ParamIDs::oscLevel (osc)); it != controlsById.end())
         {
             const bool on = processor.parameters.getRawParameterValue (ParamIDs::oscOn (osc))->load() > 0.5f;
-            const float alpha = on ? 1.0f : 0.4f;
-
-            if (it->second->getAlpha() != alpha)
-                it->second->setAlpha (alpha);
+            setDimmed (*it->second, on ? 1.0f : 0.4f);
         }
     }
 
@@ -365,7 +362,7 @@ void MainView::showViewMenu()
     const auto& themes = getThemes();
     const auto& accents = getAccents();
 
-    constexpr int themeId = 100, accentId = 200, effectId = 300;
+    constexpr int themeId = 100, accentId = 200, effectId = 300, qualityId = 400;
     juce::PopupMenu menu;
 
     menu.addSectionHeader ("THEME");
@@ -397,6 +394,15 @@ void MainView::showViewMenu()
     else
         menu.addItem (effectId + 6, "Shaders are not available (" + shaderStage->getStatus() + ")", false, false);
 
+    // Качество звука хранится в проекте, у каждого экземпляра своё
+    using Quality = SonderAudioProcessor::Quality;
+    const auto quality = processor.getQuality();
+    menu.addSectionHeader ("SOUND QUALITY (THIS INSTANCE)");
+    menu.addItem (qualityId + (int) Quality::eco, "Eco: voices at 1x, half the CPU, a bit more aliasing", true, quality == Quality::eco);
+    menu.addItem (qualityId + (int) Quality::normal, "Normal: voices at 2x", true, quality == Quality::normal);
+    menu.addItem (qualityId + (int) Quality::high, "High: voices at 4x, twice the CPU", true, quality == Quality::high);
+    menu.addItem (qualityId + 99, "Offline renders always use High", false, false);
+
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (viewButton),
                         [safeThis = juce::Component::SafePointer<MainView> (this)] (int result)
     {
@@ -404,6 +410,12 @@ void MainView::showViewMenu()
             return;
 
         auto& current = Settings::get();
+
+        if (result >= qualityId)
+        {
+            safeThis->processor.setQuality (static_cast<SonderAudioProcessor::Quality> (result - qualityId));
+            return;
+        }
 
         if (result >= effectId)
         {

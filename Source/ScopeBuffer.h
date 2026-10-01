@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdint>
 
 namespace sonder
 {
@@ -80,6 +81,41 @@ public:
 
         writePosition.store (position, std::memory_order_release);
         peakWritePosition.store (peakPosition, std::memory_order_release);
+        samplesWritten.fetch_add (numSamples, std::memory_order_release);
+    }
+
+    // Последние count моно-сэмплов или пар минимум-максимум вместе с абсолютным номером элемента после последнего:
+    // по нему бегущая волна режет экран на столбцы, привязанные ко времени, а не к краю буфера
+    std::int64_t copyLatestAligned (float* destination, int count) const noexcept
+    {
+        const auto written = samplesWritten.load (std::memory_order_acquire);
+        const int end = (int) (written & (kSize - 1));
+        int position = (end - count) & (kSize - 1);
+
+        for (int i = 0; i < count; ++i)
+        {
+            destination[i] = 0.5f * (samplesLeft[(size_t) position].load (std::memory_order_relaxed)
+                                     + samplesRight[(size_t) position].load (std::memory_order_relaxed));
+            position = (position + 1) & (kSize - 1);
+        }
+
+        return written;
+    }
+
+    std::int64_t copyLatestPeaksAligned (float* minimums, float* maximums, int count) const noexcept
+    {
+        const auto peaks = samplesWritten.load (std::memory_order_acquire) / kPeakHop;
+        const int end = (int) (peaks & (kNumPeaks - 1));
+        int position = (end - count) & (kNumPeaks - 1);
+
+        for (int i = 0; i < count; ++i)
+        {
+            minimums[i] = peaksMin[(size_t) position].load (std::memory_order_relaxed);
+            maximums[i] = peaksMax[(size_t) position].load (std::memory_order_relaxed);
+            position = (position + 1) & (kNumPeaks - 1);
+        }
+
+        return peaks;
     }
 
     // Последние count сэмплов (count <= kSize), от старых к новым; моно - полусумма каналов
@@ -130,6 +166,7 @@ private:
     std::array<std::atomic<float>, kSize> samplesLeft {}, samplesRight {};
     std::array<std::atomic<float>, kNumPeaks> peaksMin {}, peaksMax {};
     std::atomic<int> writePosition { 0 }, peakWritePosition { 0 };
+    std::atomic<std::int64_t> samplesWritten { 0 }; // всего записано сэмплов; позиции в кольцах выводятся из него
 
     // Только аудиопоток
     float hopMin = 0.0f, hopMax = 0.0f;

@@ -101,6 +101,10 @@ private:
 
         float displayCutoff = 1000.0f, displayVowel = 0.0f;
 
+        // Коэффициенты пересчитываются раз в fastInterval сэмплов (tan, exp и синусы форманта - дорогие)
+        LadderFilter::Coefficients ladderCoefficients;
+        FormantFilter::Coefficients formantCoefficients;
+
         void reset() noexcept
         {
             left.reset();
@@ -128,6 +132,9 @@ private:
     void updateSlowValues (const SynthParams& p, const ModulationBus& bus, const Tolerances& tol,
                            const float* mod, const std::array<bool, kNumVoiceDests>& used) noexcept;
     void updateLfoPoints (int lfo, const ModulationBus& bus, const float* mod) noexcept;
+
+    // Подводит сглаженные ручки к целям и пишет их в p; true - какая-то ещё в пути
+    bool smoothParameters (SynthParams& p, const SynthParams& target, bool snap) noexcept;
     void launchPendingNote (const SynthParams& params, const ModulationBus& bus, int sampleOffset);
 
     std::array<Layer, kMaxUnison> layers;
@@ -164,7 +171,13 @@ private:
     bool pendingRelease = false;
     int stealFadeLength = 256, stealFadeLeft = 0;
 
-    float parameterSmoothingCoef = 1.0f;
+    float parameterSmoothingCoef = 1.0f, fastSmoothingCoef = 1.0f;
+    int fastInterval = 4; // шаг пересчёта модуляции, высоты и фильтров (~24 кГц)
+
+    // Сглаженные значения непрерывных ручек (SynthParams::forEachSmoothed), шаг - раз в kControlInterval сэмплов
+    std::array<float, SynthParams::kNumSmoothed> smoothed {};
+    float controlSmoothingCoef = 1.0f;
+    bool smoothing = false;
     bool snapParameters = true;
 
     float cutoffDriftValue = 0.0f;

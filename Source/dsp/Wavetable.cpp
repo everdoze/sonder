@@ -150,42 +150,6 @@ Wavetable::MipSelection Wavetable::selectMip (float frequencyOverSampleRate) noe
     return { level, blend };
 }
 
-float Wavetable::read (const Level& level, int frame, float phase) const noexcept
-{
-    const float position = phase * (float) level.size;
-    const int i0 = (int) position;
-    const float frac = position - (float) i0;
-    const int mask = level.size - 1;
-    const float* data = level.data.data() + (size_t) frame * (size_t) level.size;
-    const float a = data[i0 & mask];
-    const float b = data[(i0 + 1) & mask];
-    return a + (b - a) * frac;
-}
-
-float Wavetable::sampleLevel (const Level& level, float phase, float position) const noexcept
-{
-    const float framePosition = juce::jlimit (0.0f, 1.0f, position) * (float) (numFrames - 1);
-    const int frame0 = (int) framePosition;
-    const float frac = framePosition - (float) frame0;
-
-    const float a = read (level, frame0, phase);
-    if (frac <= 0.0f || frame0 + 1 >= numFrames)
-        return a;
-
-    const float b = read (level, frame0 + 1, phase);
-    return a + (b - a) * frac;
-}
-
-float Wavetable::sample (float phase, float position, MipSelection mip) const noexcept
-{
-    const float a = sampleLevel (levels[(size_t) mip.level], phase, position);
-    if (mip.blend <= 0.001f || mip.level + 1 >= kNumLevels)
-        return a;
-
-    const float b = sampleLevel (levels[(size_t) mip.level + 1], phase, position);
-    return a + (b - a) * mip.blend;
-}
-
 const float* Wavetable::getFrame (int frame) const noexcept
 {
     return levels[0].data.data() + (size_t) juce::jlimit (0, numFrames - 1, frame) * (size_t) levels[0].size;

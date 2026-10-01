@@ -62,7 +62,7 @@ namespace
         const auto source = (float) (int) sourceForLfo (index);
 
         for (int slot = 0; slot < kNumModSlots; ++slot)
-            if (processor.parameters.getRawParameterValue (ParamIDs::modSource (slot))->load() == source)
+            if (processor.getParameterRefs().modSource[(size_t) slot]->load() == source)
                 return true;
 
         return false;
@@ -128,11 +128,22 @@ void LfoPanel::timerCallback()
     // Ручка частоты не действует, пока включена синхронизация с темпом
     if (rateControl != nullptr)
     {
-        const bool synced = processor.parameters.getRawParameterValue (ParamIDs::lfoSync (selected))->load() > 0.5f;
-        rateControl->setAlpha (synced ? 0.35f : 1.0f);
+        const bool synced = processor.getParameterRefs().lfoSync[(size_t) selected]->load() > 0.5f;
+        setDimmed (*rateControl, synced ? 0.35f : 1.0f);
     }
 
-    repaint();
+    // Огоньки на вкладках: перерисовываем вкладки, только когда набор используемых LFO поменялся
+    uint32_t mask = (uint32_t) shownCount << 16;
+    for (int i = 0; i < shownCount; ++i)
+        if (isLfoUsed (i))
+            mask |= 1u << i;
+
+    if (mask != ledMask)
+    {
+        ledMask = mask;
+        for (auto& tab : tabs)
+            repaint (tab.getBounds());
+    }
 }
 
 void LfoPanel::resized()

@@ -62,12 +62,25 @@ void OscillatorView::timerCallback()
     positionTrail[0] = livePosition;
 
     tilt += (tiltTarget - tilt) * 0.2f;
+    if (std::abs (tiltTarget.x - tilt.x) < 0.002f && std::abs (tiltTarget.y - tilt.y) < 0.002f)
+        tilt = tiltTarget; // доехали: дальше стопка не меняется и берётся из кэша
 
     // Цвет (тембр и накал экрана) меняется плавно: перерисовываем, когда он заметно сдвинулся
     const auto colour = visuals.traceBright().withMultipliedAlpha (visuals.getPower()).getARGB() & 0xfcfcfcfcu;
 
-    // Стопка кадров в движении перерисовывается каждый кадр
-    const bool moving = shape == kWavetableShape && Settings::get().motion && isVisible() && on;
+    // Стопка кадров в движении: шлейф позиции и поворот за мышью - каждый кадр,
+    // медленное покачивание само по себе - реже (разницы не видно, а стопка из 20 кадров не бесплатная)
+    const bool swaying = shape == kWavetableShape && Settings::get().motion && isVisible() && on;
+    const bool trailMoving = positionTrail.front() != positionTrail.back();
+    const bool tilting = std::abs (tiltTarget.x - tilt.x) > 0.002f || std::abs (tiltTarget.y - tilt.y) > 0.002f;
+    const bool swayFrame = swaying && ++swayCounter >= kSwayDivider;
+    if (swayFrame)
+    {
+        swayCounter = 0;
+        swayTime = Visuals::now();
+    }
+
+    const bool moving = swayFrame || (swaying && (trailMoving || tilting));
     const bool shaders = shader.isAvailable() && Visuals::wantsShaders (*this);
 
     if (moving || shaders != lastShaders || on != lastOn || shape != lastShape || version != lastVersion || position != lastPosition
@@ -83,7 +96,8 @@ void OscillatorView::timerCallback()
         lastShaders = shaders;
 
         if (shaders)
-            shader.render (*this, visuals.screenFx(), [this] (juce::Graphics& g) { paintScreen (g, true); });
+            shader.render (*this, visuals.screenFx(), [this] (juce::Graphics& g) { paintScreen (g, true); }, false,
+                           ShaderScreen::Detail::supersampled);
         else
             shader.invalidate();
 
@@ -266,7 +280,7 @@ void OscillatorView::paintWavetable (juce::Graphics& g, juce::Rectangle<float> a
     float swayX = 0.0f, swayY = 0.0f;
     if (Settings::get().motion)
     {
-        const double t = Visuals::now() + (double) oscillator * 3.1;
+        const double t = swayTime + (double) oscillator * 3.1;
         swayX = 0.10f * (float) std::sin (t * 0.55) + 0.30f * tilt.x;
         swayY = 0.07f * (float) std::sin (t * 0.37 + 1.0) - 0.22f * tilt.y;
     }
@@ -284,18 +298,22 @@ void OscillatorView::paintWavetable (juce::Graphics& g, juce::Rectangle<float> a
     const int currentFrame = juce::roundToInt (position * (float) (numFrames - 1));
     const int baseFrame = juce::roundToInt (juce::jmax (0.0f, lastPosition) * (float) (numFrames - 1));
 
+    // Кадр рисуется по уровню таблицы с 64 гармониками: при 256 точках на экране каждая гармоника
+    // прорисована гладко, а острые фронты не превращаются в ломаные зубцы (как при прореживании кадра)
+    const Wavetable::MipSelection displayMip { 4, 0.0f };
+
     const auto framePath = [&] (int frame, float depth)
     {
-        const float* data = table->getFrame (frame);
+        const float framePosition = numFrames > 1 ? (float) frame / (float) (numFrames - 1) : 0.0f;
         const float originX = originBase + depth * depthX;
         const float centreY = area.getBottom() - amplitude - depth * depthY;
 
         juce::Path path;
-        constexpr int points = 128;
+        constexpr int points = 256;
         for (int i = 0; i <= points; ++i)
         {
-            const int index = juce::jmin (Wavetable::kFrameSize - 1, i * Wavetable::kFrameSize / points);
-            const juce::Point<float> p (originX + frameWidth * (float) i / points, centreY - data[index] * amplitude);
+            const float value = table->sample ((float) (i % points) / points, framePosition, displayMip);
+            const juce::Point<float> p (originX + frameWidth * (float) i / points, centreY - value * amplitude);
             if (i == 0)
                 path.startNewSubPath (p);
             else
@@ -304,14 +322,36 @@ void OscillatorView::paintWavetable (juce::Graphics& g, juce::Rectangle<float> a
         return path;
     };
 
-    // Сзади наперёд: дальние кадры тусклее
-    for (int k = shown - 1; k >= 0; --k)
+    // Стопка сзади наперёд, дальние кадры тусклее. Рисуется в картинку в разрешении экрана и берётся
+    // из неё, пока стопка не сдвинулась: 20 кадров по 256 точек - самое дорогое на этом экране
+    const float scale = juce::jmax (0.25f, g.getInternalContext().getPhysicalPixelScaleFactor());
+    const StackKey key { table, numFrames, juce::roundToInt ((float) getWidth() * scale), juce::roundToInt ((float) getHeight() * scale),
+                         swayX, swayY, power, Palette::accent.getARGB() };
+
+    if (! stackImage.isValid() || ! (key == stackKey))
     {
-        const float depth = shown > 1 ? (float) k / (float) (shown - 1) : 0.0f;
-        const int frame = juce::roundToInt (depth * (float) (numFrames - 1));
-        g.setColour (Palette::accent.withAlpha ((0.08f + 0.22f * (1.0f - depth)) * power));
-        g.strokePath (framePath (frame, depth), juce::PathStrokeType (1.0f));
+        if (stackImage.getWidth() != key.width || stackImage.getHeight() != key.height)
+            stackImage = juce::Image (juce::Image::ARGB, juce::jmax (1, key.width), juce::jmax (1, key.height), true,
+                                      juce::SoftwareImageType());
+        else
+            stackImage.clear (stackImage.getBounds());
+
+        juce::Graphics stack (stackImage);
+        stack.addTransform (juce::AffineTransform::scale (scale));
+
+        for (int k = shown - 1; k >= 0; --k)
+        {
+            const float depth = shown > 1 ? (float) k / (float) (shown - 1) : 0.0f;
+            const int frame = juce::roundToInt (depth * (float) (numFrames - 1));
+            stack.setColour (Palette::accent.withAlpha ((0.08f + 0.22f * (1.0f - depth)) * power));
+            stack.strokePath (framePath (frame, depth), juce::PathStrokeType (1.0f));
+        }
+
+        stackKey = key;
     }
+
+    // Картинка ровно в пикселях экрана: без масштабирования это простое копирование
+    g.drawImageTransformed (stackImage, juce::AffineTransform::scale (1.0f / scale));
 
     // Положение ручки (если модуляция его сдвинула - тонкой линией)
     if (baseFrame != currentFrame)

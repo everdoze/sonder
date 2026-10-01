@@ -27,6 +27,25 @@ void clearModulationSlot (Apvts& state, int slot);
 // показывают кольцо диапазона модуляции с живой точкой; Alt+drag меняет глубину, правый клик - меню
 // (там же направление: в обе стороны, только вверх, только вниз).
 // При смене пресета ручка не прыгает, а плавно доезжает до нового значения (beginMorph).
+// Приглушить компонент (выключенный осциллятор, ручка без действия).
+// Прозрачность ставится детям, а не самому компоненту: полупрозрачного ребёнка JUCE рисует через слой
+// размером со всю перерисовываемую область родителя (клип до границ ребёнка не сужается), и каждая
+// перерисовка большого экрана рядом гоняла такой слой на пол-окна. У детей клип уже сужен до границ
+// компонента, и слой выходит размером с ручку.
+inline void setDimmed (juce::Component& component, float alpha)
+{
+    if (component.getNumChildComponents() == 0)
+    {
+        if (component.getAlpha() != alpha)
+            component.setAlpha (alpha);
+        return;
+    }
+
+    for (auto* child : component.getChildren())
+        if (child->getAlpha() != alpha)
+            child->setAlpha (alpha);
+}
+
 class ParameterControl final : public juce::Component,
                                public juce::DragAndDropTarget,
                                private juce::Timer

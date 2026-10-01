@@ -57,6 +57,27 @@ private:
     // Недавние позиции в таблице: шлейф за текущим кадром
     static constexpr int kTrailLength = 6;
     std::array<float, kTrailLength> positionTrail {};
+
+    // Само покачивание стопки медленное (пара пикселей в секунду): для него хватает каждого kSwayDivider-го кадра.
+    // swayTime - время, по которому стопка покачивается; между такими кадрами оно стоит
+    static constexpr int kSwayDivider = 4;
+    int swayCounter = 0;
+    double swayTime = 0.0;
+
+    // Стопка кадров без текущей позиции и шлейфа кэшируется картинкой в разрешении экрана: она меняется
+    // только с покачиванием, поворотом, таблицей и цветом, а позицию модуляция двигает каждый кадр
+    struct StackKey
+    {
+        const void* table = nullptr;
+        int numFrames = 0, width = 0, height = 0;
+        float swayX = 0.0f, swayY = 0.0f, power = 0.0f;
+        juce::uint32 colour = 0;
+
+        bool operator== (const StackKey&) const = default;
+    };
+
+    juce::Image stackImage;
+    StackKey stackKey;
 };
 
 } // namespace sonder::ui

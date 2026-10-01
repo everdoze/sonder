@@ -248,8 +248,7 @@ void FxStrip::updateBypassLook()
     const float alpha = on ? 1.0f : 0.4f;
 
     for (auto& control : controls)
-        if (control->getAlpha() != alpha)
-            control->setAlpha (alpha);
+        setDimmed (*control, alpha);
 
     if (on != shownOn)
     {

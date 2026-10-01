@@ -282,11 +282,10 @@ std::vector<int> ParameterControl::modulationSlots() const
     if (destination == ModDest::off)
         return slots;
 
-    auto& state = processor.parameters;
     for (int slot = 0; slot < kNumModSlots; ++slot)
     {
-        const auto dest = (int) state.getRawParameterValue (ParamIDs::modDest (slot))->load();
-        const auto source = (int) state.getRawParameterValue (ParamIDs::modSource (slot))->load();
+        const auto dest = (int) processor.getParameterRefs().modDest[(size_t) slot]->load();
+        const auto source = (int) processor.getParameterRefs().modSource[(size_t) slot]->load();
         if (dest == (int) destination && source != (int) ModSource::off)
             slots.push_back (slot);
     }
@@ -308,10 +307,9 @@ int ParameterControl::pickActiveSlot()
 
 juce::String ParameterControl::describeSlot (int slot) const
 {
-    auto& state = processor.parameters;
-    const int source = (int) state.getRawParameterValue (ParamIDs::modSource (slot))->load();
-    const float amount = state.getRawParameterValue (ParamIDs::modAmount (slot))->load();
-    const int polarity = (int) state.getRawParameterValue (ParamIDs::modPolarity (slot))->load();
+    const int source = (int) processor.getParameterRefs().modSource[(size_t) slot]->load();
+    const float amount = processor.getParameterRefs().modAmount[(size_t) slot]->load();
+    const int polarity = (int) processor.getParameterRefs().modPolarity[(size_t) slot]->load();
     const int percent = juce::roundToInt (amount * 100.0f);
     static const char* directions[] { "both ways", "up", "down" };
     return Choices::modSources()[source] + "  " + (percent > 0 ? "+" : "") + juce::String (percent) + "%, "
@@ -320,10 +318,9 @@ juce::String ParameterControl::describeSlot (int slot) const
 
 std::pair<float, float> ParameterControl::slotSpan (int slot) const
 {
-    auto& state = processor.parameters;
-    const auto source = static_cast<ModSource> ((int) state.getRawParameterValue (ParamIDs::modSource (slot))->load());
-    const auto polarity = static_cast<ModPolarity> (juce::jlimit (0, 2, (int) state.getRawParameterValue (ParamIDs::modPolarity (slot))->load()));
-    const float amount = state.getRawParameterValue (ParamIDs::modAmount (slot))->load();
+    const auto source = static_cast<ModSource> ((int) processor.getParameterRefs().modSource[(size_t) slot]->load());
+    const auto polarity = static_cast<ModPolarity> (juce::jlimit (0, 2, (int) processor.getParameterRefs().modPolarity[(size_t) slot]->load()));
+    const float amount = processor.getParameterRefs().modAmount[(size_t) slot]->load();
     return modulationSpan (source, polarity, amount);
 }
 
@@ -358,7 +355,7 @@ void ParameterControl::showModulationMenu()
 
     for (int slot : slots)
     {
-        const int polarity = (int) processor.parameters.getRawParameterValue (ParamIDs::modPolarity (slot))->load();
+        const int polarity = (int) processor.getParameterRefs().modPolarity[(size_t) slot]->load();
 
         juce::PopupMenu sub;
         sub.addItem (1000 + slot, "Edit with Alt+drag", true, slot == activeSlot);
@@ -412,7 +409,7 @@ void ParameterControl::showModulationMenu()
         else if (result >= 2000)
         {
             const int slot = result - 2000;
-            const float amount = control.processor.parameters.getRawParameterValue (ParamIDs::modAmount (slot))->load();
+            const float amount = control.processor.getParameterRefs().modAmount[(size_t) slot]->load();
             control.setParameterValue (ParamIDs::modAmount (slot), -amount);
         }
         else if (result >= 1000)
@@ -443,7 +440,7 @@ bool ParameterControl::handleMouseDown (const juce::MouseEvent& e)
 
     draggingAmount = true;
     dragMoved = false;
-    dragStartAmount = processor.parameters.getRawParameterValue (ParamIDs::modAmount (slot))->load();
+    dragStartAmount = processor.getParameterRefs().modAmount[(size_t) slot]->load();
     dragStartY = e.position.y;
 
     if (auto* amount = processor.parameters.getParameter (ParamIDs::modAmount (slot)))
@@ -506,11 +503,10 @@ void ParameterControl::showOverlay (int slot, int holdMilliseconds)
                                       "LFO 3", "LFO 4", "LFO 5", "LFO 6", "LFO 7", "LFO 8", "Slide" };
     static const char* directions[] { "", " up", " down" };
 
-    auto& state = processor.parameters;
     const int source = juce::jlimit (0, (int) std::size (shortNames) - 1,
-                                     (int) state.getRawParameterValue (ParamIDs::modSource (slot))->load());
-    const int percent = juce::roundToInt (state.getRawParameterValue (ParamIDs::modAmount (slot))->load() * 100.0f);
-    const int polarity = juce::jlimit (0, 2, (int) state.getRawParameterValue (ParamIDs::modPolarity (slot))->load());
+                                     (int) processor.getParameterRefs().modSource[(size_t) slot]->load());
+    const int percent = juce::roundToInt (processor.getParameterRefs().modAmount[(size_t) slot]->load() * 100.0f);
+    const int polarity = juce::jlimit (0, 2, (int) processor.getParameterRefs().modPolarity[(size_t) slot]->load());
     amountOverlay = juce::String (shortNames[source]) + " " + (percent > 0 ? "+" : "") + juce::String (percent) + "%"
                   + directions[polarity];
 
@@ -590,13 +586,12 @@ void ParameterControl::updateModulationRing()
     if (slider == nullptr || parameter == nullptr)
         return;
 
-    auto& state = processor.parameters;
     float low = 0.0f, high = 0.0f;
     bool active = false;
 
     for (int slot : modulationSlots())
     {
-        if (state.getRawParameterValue (ParamIDs::modAmount (slot))->load() == 0.0f)
+        if (processor.getParameterRefs().modAmount[(size_t) slot]->load() == 0.0f)
             continue;
 
         active = true;
@@ -1181,7 +1176,7 @@ void EnvelopeView::timerCallback()
         {
             auto fx = Visuals::staticScreenFx (false);
             fx.cornerRadius = 5.0f;
-            shader.render (*this, fx, [this] (juce::Graphics& g) { paintScreen (g, true); }, true);
+            shader.render (*this, fx, [this] (juce::Graphics& g) { paintScreen (g, true); }, true, ShaderScreen::Detail::native);
         }
         else
         {

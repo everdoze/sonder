@@ -86,14 +86,14 @@ public:
                 controlCounter = 16;
                 const float cutoffLeft = cutoffFor (p, lfoValue (shape, phase));
                 const float cutoffRight = cutoffFor (p, lfoValue (shape, phase + spread));
-                coefficientsLeft = LadderFilter::makeCoefficients (cutoffLeft, resonance, piOverSampleRate, maxCutoff);
-                coefficientsRight = LadderFilter::makeCoefficients (cutoffRight, resonance, piOverSampleRate, maxCutoff);
+                coefficientsLeft = LadderFilter::makeCoefficients (cutoffLeft, resonance, mode, piOverSampleRate, maxCutoff);
+                coefficientsRight = LadderFilter::makeCoefficients (cutoffRight, resonance, mode, piOverSampleRate, maxCutoff);
                 displayCutoff.store (cutoffLeft);
             }
 
             const float dryLeft = leftChannel[i], dryRight = rightChannel[i];
-            const float wetLeft = left.process (dryLeft, coefficientsLeft, driveGain, mode) * makeup;
-            const float wetRight = right.process (dryRight, coefficientsRight, driveGain, mode) * makeup;
+            const float wetLeft = left.process (dryLeft, coefficientsLeft, driveGain) * makeup;
+            const float wetRight = right.process (dryRight, coefficientsRight, driveGain) * makeup;
 
             leftChannel[i] = dryLeft + (wetLeft - dryLeft) * mix;
             rightChannel[i] = dryRight + (wetRight - dryRight) * mix;

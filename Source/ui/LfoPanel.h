@@ -49,6 +49,7 @@ private:
     LfoEditor editor;
     std::unique_ptr<ParameterControl> shapeControl, modeControl, rateControl, syncControl;
     int selected = 0;
+    uint32_t ledMask = ~0u; // какие огоньки на вкладках горят: перерисовываем вкладки, только когда это меняется
     int shownCount = 0;
 };
 

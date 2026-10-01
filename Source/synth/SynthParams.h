@@ -383,6 +383,38 @@ struct SynthParams
     {
         return slot.source != ModSource::off && slot.dest != ModDest::off && slot.amount != 0.0f;
     }
+
+    // Непрерывные ручки, которые голос сглаживает (иначе поворот ручки - ступенька раз в блок, то есть щелчок).
+    // Срез, резонанс и драйв фильтра сглаживаются отдельно, посэмплово.
+    // Сустейн тоже: его ступенька слышна, пока нота держится.
+    static constexpr int kNumSmoothed = kNumOscs * 4 + 15 + kNumFilters * 4;
+
+    // visit (номер, ссылка на значение) - для SynthParams и const SynthParams в одном порядке
+    template <typename Self, typename Visit>
+    static void forEachSmoothed (Self& self, Visit&& visit) noexcept
+    {
+        int index = 0;
+        for (auto& osc : self.oscs)
+        {
+            visit (index++, osc.level);
+            visit (index++, osc.wtPos);
+            visit (index++, osc.pulseWidth);
+            visit (index++, osc.fineCents);
+        }
+
+        for (auto* value : { &self.subLevel, &self.noiseLevel, &self.noiseColor, &self.fmAmount, &self.ringLevel,
+                             &self.foldAmount, &self.distDrive, &self.distMix, &self.distTone, &self.unisonDetune,
+                             &self.unisonWidth, &self.vibrato, &self.ampVelocity, &self.ampSustain, &self.filterSustain })
+            visit (index++, *value);
+
+        for (auto& filter : self.filters)
+        {
+            visit (index++, filter.vowel);
+            visit (index++, filter.envAmount);
+            visit (index++, filter.keyTrack);
+            visit (index++, filter.velocityToCutoff);
+        }
+    }
 };
 
 // Шкалы ручек для целей "в долях хода": модуляция добавляется к нормированному положению ручки

@@ -14,7 +14,7 @@ public:
 
     bool isValid() const noexcept { return renderContext != nullptr; }
 
-    // Делает контекст текущим на время жизни объекта и возвращает прежний: на message thread
+    // Делает контекст текущим и возвращает прежний, если он был: на message thread
     // хоста может быть активен чужой контекст, его нельзя сбивать
     class Scope
     {
@@ -25,6 +25,7 @@ public:
     private:
         void* previousDevice = nullptr;
         void* previousContext = nullptr;
+        bool alreadyCurrent = false;
     };
 
 private:

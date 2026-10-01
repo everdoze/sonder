@@ -35,6 +35,8 @@ private:
     OscillatorView view;
     std::unique_ptr<ParameterControl> shapeControl, positionControl, widthControl, semiControl, fineControl, levelControl;
     int selected = 0;
+    void repaintTabLeds();
+    uint32_t ledMask = ~0u; // какие огоньки на вкладках горят: перерисовываем вкладки, только когда это меняется
 };
 
 } // namespace sonder::ui

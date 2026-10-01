@@ -81,14 +81,21 @@ public:
     bool isAvailable() const noexcept { return stage->isAvailable(); }
     const juce::String& getStatus() const noexcept { return stage->getStatus(); }
 
+    // Разрешение исходника. Animated: экран перерисовывается каждый кадр, поэтому в крупном окне разрешение
+    // ограничено (шейдеры всё равно смягчают картинку, подписи рисуются поверх в полном разрешении).
+    // Native: экран перерисовывается только при изменениях - полное разрешение окна, без мыла.
+    // Supersampled: вдвое больше пикселей, чем в окне (тонкие линии после изгиба стекла не рябят).
+    enum class Detail { animated, native, supersampled };
+
     // Рисует содержимое экрана функцией paint (в координатах компонента) и прогоняет через шейдеры.
     // immediate - см. ShaderStage::Screen::process.
     template <typename Paint>
-    void render (const juce::Component& owner, ScreenFx fx, Paint&& paint, bool immediate = false)
+    void render (const juce::Component& owner, ScreenFx fx, Paint&& paint, bool immediate = false,
+                 Detail detail = Detail::animated)
     {
-        // Исходник рисуется программно, поэтому в крупном окне его разрешение ограничено:
-        // шейдеры всё равно смягчают картинку, а подписи рисуются поверх в полном разрешении
-        const float renderScale = juce::jmin (scale, kMaxRenderScale);
+        const float renderScale = detail == Detail::animated ? juce::jmin (scale, kMaxRenderScale)
+                                : detail == Detail::native   ? scale
+                                                             : juce::jmin (scale * 2.0f, kMaxSupersampledScale);
         const int width = juce::roundToInt ((float) owner.getWidth() * renderScale);
         const int height = juce::roundToInt ((float) owner.getHeight() * renderScale);
 
@@ -139,6 +146,7 @@ public:
 
 private:
     static constexpr float kMaxRenderScale = 1.25f;
+    static constexpr float kMaxSupersampledScale = 3.0f;
 
     juce::SharedResourcePointer<ShaderStage> stage;
     std::unique_ptr<ShaderStage::Screen> screen;

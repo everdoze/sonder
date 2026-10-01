@@ -113,13 +113,25 @@ void OscPanel::timerCallback()
     {
         const bool relevant = (control != positionControl.get() || shape == kWavetableShape)
                            && (control != widthControl.get() || shape == kPulseShape);
-        const float alpha = relevant ? base : base * 0.4f;
-
-        if (control->getAlpha() != alpha)
-            control->setAlpha (alpha);
+        setDimmed (*control, relevant ? base : base * 0.4f);
     }
 
-    repaint();
+    repaintTabLeds();
+}
+
+void OscPanel::repaintTabLeds()
+{
+    uint32_t mask = 0;
+    for (int i = 0; i < kNumOscs; ++i)
+        if (isOn (i))
+            mask |= 1u << i;
+
+    if (mask == ledMask)
+        return;
+
+    ledMask = mask;
+    for (auto& tab : tabs)
+        repaint (tab.getBounds());
 }
 
 void OscPanel::resized()

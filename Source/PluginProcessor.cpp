@@ -42,12 +42,28 @@ void SonderAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock
     currentSampleRate = sampleRate;
     maxBlockSize = juce::jmax (1, samplesPerBlock);
 
-    oversampling = std::make_unique<juce::dsp::Oversampling<float>> (2, kOversamplingOrder,
-                                                                      juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR,
-                                                                      true, false);
-    oversampling->initProcessing ((size_t) maxBlockSize);
+    // Порядок передискретизации: 0 - без неё, 1 - ×2, 2 - ×4
+    const auto makeOversampling = [this] (Quality q)
+    {
+        auto result = std::make_unique<juce::dsp::Oversampling<float>> (2, (size_t) q,
+                                                                        juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR,
+                                                                        true, false);
+        result->initProcessing ((size_t) maxBlockSize);
+        return result;
+    };
 
-    // Синтез идёт на удвоенной частоте: меньше алиасинга от нелинейностей, эффекты на обычной
+    const auto rendering = getRenderingQuality();
+    preparedQuality = (int) rendering;
+    oversampling = makeOversampling (rendering);
+
+    // Хосту всегда сообщается задержка High, остальное добирается буфером на выходе
+    const int maxLatency = juce::roundToInt (makeOversampling (Quality::high)->getLatencyInSamples());
+    latencyPad = juce::jlimit (0, kMaxLatencyPad - 1, maxLatency - juce::roundToInt (oversampling->getLatencyInSamples()));
+    padPosition = 0;
+    for (auto& channel : padBuffer)
+        channel.fill (0.0f);
+
+    // Синтез идёт на повышенной частоте: меньше алиасинга от нелинейностей, эффекты на обычной
     const auto factor = (int) oversampling->getOversamplingFactor();
     oversampledRate = sampleRate * factor;
     const int maxOversampledBlock = maxBlockSize * factor;
@@ -67,7 +83,59 @@ void SonderAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock
     masterGain.setCurrentAndTargetValue (juce::Decibels::decibelsToGain (params.masterGain->load() - kOutputStageDb));
 
     scope.sampleRate.store ((float) sampleRate);
-    setLatencySamples (juce::roundToInt (oversampling->getLatencyInSamples()));
+    setLatencySamples (maxLatency);
+}
+
+void SonderAudioProcessor::setQuality (Quality newQuality)
+{
+    if ((int) newQuality == quality.load())
+        return;
+
+    quality.store ((int) newQuality);
+    applyQuality();
+}
+
+void SonderAudioProcessor::setNonRealtime (bool offline) noexcept
+{
+    AudioProcessor::setNonRealtime (offline);
+    applyQuality();
+}
+
+void SonderAudioProcessor::applyQuality()
+{
+    // Ещё не подготовлен или качество не поменялось - prepareToPlay всё сделает сам
+    if (maxBlockSize == 0 || (int) getRenderingQuality() == preparedQuality)
+        return;
+
+    // Частота голосов меняется целиком: останавливаем обработку и готовим всё заново (звучащие ноты обрываются)
+    suspendProcessing (true);
+    prepareToPlay (currentSampleRate, maxBlockSize);
+    suspendProcessing (false);
+}
+
+void SonderAudioProcessor::applyLatencyPad (juce::AudioBuffer<float>& buffer) noexcept
+{
+    if (latencyPad == 0)
+        return;
+
+    // Кольцевой буфер на kMaxLatencyPad отсчётов: читаем то, что записали latencyPad сэмплов назад
+    const int numSamples = buffer.getNumSamples();
+    float* channels[] { buffer.getWritePointer (0), buffer.getWritePointer (1) };
+    int position = padPosition;
+
+    for (int i = 0; i < numSamples; ++i)
+    {
+        const int read = (position - latencyPad + kMaxLatencyPad) % kMaxLatencyPad;
+        for (size_t c = 0; c < 2; ++c)
+        {
+            const float input = channels[c][i];
+            channels[c][i] = padBuffer[c][(size_t) read];
+            padBuffer[c][(size_t) position] = input;
+        }
+        position = (position + 1) % kMaxLatencyPad;
+    }
+
+    padPosition = position;
 }
 
 SonderAudioProcessor::Transport SonderAudioProcessor::readTransport() const
@@ -163,6 +231,7 @@ void SonderAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
         renderChunk (buffer, midi, start, length, synthParams, transport);
     }
 
+    applyLatencyPad (buffer);
     updateDisplayState (synthParams);
 }
 
@@ -504,6 +573,7 @@ void SonderAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
         xml->addChildElement (wavetables.toXml().release());
         xml->addChildElement (fxController.toXml().release());
         xml->addChildElement (tuning.toXml().release());
+        xml->setAttribute ("quality", quality.load());
         copyXmlToBinary (*xml, destData);
     }
 }
@@ -523,6 +593,8 @@ void SonderAudioProcessor::setStateInformation (const void* data, int sizeInByte
         rackXml = std::make_unique<juce::XmlElement> (*rackElement);
 
     tuning.fromXml (xml->getChildByName ("Tuning"));
+    setQuality (static_cast<Quality> (juce::jlimit (0, 2, xml->getIntAttribute ("quality", (int) Quality::normal))));
+    xml->removeAttribute ("quality");
     xml->deleteAllChildElementsWithTagName ("Tuning");
     xml->deleteAllChildElementsWithTagName ("LfoShapes");
     xml->deleteAllChildElementsWithTagName ("Wavetables");

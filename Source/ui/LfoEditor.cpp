@@ -97,12 +97,11 @@ float LfoEditor::displayValue (float phase) const
 std::vector<int> LfoEditor::pointSlots (int point) const
 {
     std::vector<int> slots;
-    auto& state = processor.parameters;
 
     for (int slot = 0; slot < kNumModSlots; ++slot)
     {
-        const auto dest = static_cast<ModDest> ((int) state.getRawParameterValue (ParamIDs::modDest (slot))->load());
-        const int source = (int) state.getRawParameterValue (ParamIDs::modSource (slot))->load();
+        const auto dest = static_cast<ModDest> ((int) processor.getParameterRefs().modDest[(size_t) slot]->load());
+        const int source = (int) processor.getParameterRefs().modSource[(size_t) slot]->load();
         int slotLfo = 0, slotPoint = 0;
         bool position = false;
 
@@ -124,17 +123,16 @@ bool LfoEditor::hasPointModulation() const
 
 std::pair<float, float> LfoEditor::pointSpan (int point, bool position) const
 {
-    auto& state = processor.parameters;
     float low = 0.0f, high = 0.0f;
 
     for (int slot : pointSlots (point))
     {
-        if ((int) state.getRawParameterValue (ParamIDs::modDest (slot))->load() != (int) lfoPointDest (lfo, point, position))
+        if ((int) processor.getParameterRefs().modDest[(size_t) slot]->load() != (int) lfoPointDest (lfo, point, position))
             continue;
 
-        const auto source = static_cast<ModSource> ((int) state.getRawParameterValue (ParamIDs::modSource (slot))->load());
-        const auto polarity = static_cast<ModPolarity> (juce::jlimit (0, 2, (int) state.getRawParameterValue (ParamIDs::modPolarity (slot))->load()));
-        const auto [spanLow, spanHigh] = modulationSpan (source, polarity, state.getRawParameterValue (ParamIDs::modAmount (slot))->load());
+        const auto source = static_cast<ModSource> ((int) processor.getParameterRefs().modSource[(size_t) slot]->load());
+        const auto polarity = static_cast<ModPolarity> (juce::jlimit (0, 2, (int) processor.getParameterRefs().modPolarity[(size_t) slot]->load()));
+        const auto [spanLow, spanHigh] = modulationSpan (source, polarity, processor.getParameterRefs().modAmount[(size_t) slot]->load());
         low += spanLow;
         high += spanHigh;
     }
@@ -149,7 +147,7 @@ void LfoEditor::remapPointModulation (const std::function<int (int)>& newIndex)
 
     for (int slot = 0; slot < kNumModSlots; ++slot)
     {
-        const auto dest = static_cast<ModDest> ((int) state.getRawParameterValue (ParamIDs::modDest (slot))->load());
+        const auto dest = static_cast<ModDest> ((int) processor.getParameterRefs().modDest[(size_t) slot]->load());
         int slotLfo = 0, point = 0;
         bool position = false;
 
@@ -311,7 +309,7 @@ void LfoEditor::mouseDown (const juce::MouseEvent& e)
     if (e.mods.isAltDown() && modulatedPoint)
     {
         amountSlot = pointSlots (hit.index).back();
-        amountStart = processor.parameters.getRawParameterValue (ParamIDs::modAmount (amountSlot))->load();
+        amountStart = processor.getParameterRefs().modAmount[(size_t) amountSlot]->load();
         dragStartY = e.position.y;
 
         if (auto* amount = processor.parameters.getParameter (ParamIDs::modAmount (amountSlot)))
@@ -506,7 +504,6 @@ void LfoEditor::showMenu()
 
 void LfoEditor::showPointMenu (int point)
 {
-    auto& state = processor.parameters;
     const auto slots = pointSlots (point);
 
     juce::PopupMenu menu;
@@ -514,10 +511,10 @@ void LfoEditor::showPointMenu (int point)
 
     for (int slot : slots)
     {
-        const int source = (int) state.getRawParameterValue (ParamIDs::modSource (slot))->load();
-        const int percent = juce::roundToInt (state.getRawParameterValue (ParamIDs::modAmount (slot))->load() * 100.0f);
-        const int polarity = (int) state.getRawParameterValue (ParamIDs::modPolarity (slot))->load();
-        const bool position = (int) state.getRawParameterValue (ParamIDs::modDest (slot))->load() == (int) lfoPointDest (lfo, point, true);
+        const int source = (int) processor.getParameterRefs().modSource[(size_t) slot]->load();
+        const int percent = juce::roundToInt (processor.getParameterRefs().modAmount[(size_t) slot]->load() * 100.0f);
+        const int polarity = (int) processor.getParameterRefs().modPolarity[(size_t) slot]->load();
+        const bool position = (int) processor.getParameterRefs().modDest[(size_t) slot]->load() == (int) lfoPointDest (lfo, point, true);
 
         juce::PopupMenu sub;
         sub.addItem (100 + slot, "Moves the height", true, ! position);
@@ -585,7 +582,8 @@ void LfoEditor::showPointMenu (int point)
 void LfoEditor::render (bool immediate)
 {
     if (shader.isAvailable() && Visuals::wantsShaders (*this))
-        shader.render (*this, Visuals::staticScreenFx (true), [this] (juce::Graphics& g) { paintScreen (g, true); }, immediate);
+        shader.render (*this, Visuals::staticScreenFx (true), [this] (juce::Graphics& g) { paintScreen (g, true); }, immediate,
+                       ShaderScreen::Detail::native);
     else
         shader.invalidate();
 }

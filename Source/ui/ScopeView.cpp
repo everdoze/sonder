@@ -1,4 +1,5 @@
 #include "ScopeView.h"
+#include "ScopeTrigger.h"
 #include "SonderLookAndFeel.h"
 #include "Theme.h"
 
@@ -125,57 +126,52 @@ bool ScopeView::buildWave (juce::Rectangle<float> plot, juce::Path& trace, juce:
     // Окно: целое число периодов последней ноты
     const float sampleRate = scope.sampleRate.load();
     const float frequency = scope.noteFrequency.load();
-    float period = frequency > 0.0f ? sampleRate / frequency : 512.0f;
+    const float nominal = frequency > 0.0f ? sampleRate / frequency : 512.0f;
 
-    // Зона поиска - два периода: реальная высота отличается от номинальной (дрейф, расстройка, вибрато, глайд),
-    // и в зоне ровно в один период переход через ноль иногда не находился - картинка прыгала
-    const int search = juce::jlimit (4, 4000, juce::roundToInt (period * 2.0f) + 4);
-    const int maxWindow = ScopeBuffer::kSize - search - 2;
-    int window = juce::jlimit (64, juce::jmin (4096, maxWindow), juce::roundToInt (period * juce::jlimit (2.0f, 12.0f, std::ceil (400.0f / period))));
-    const int total = window + search + 2;
-
+    // Весь буфер: настоящий период может быть длиннее номинального (дрейф, бенд, глайд, строй)
+    // и даже кратным ему (суб на октаву ниже); начало окна ищется у свежего края
+    const int total = ScopeBuffer::kSize - 2;
     scope.copyLatest (samples.data(), total);
 
     float peak = 0.0f;
     for (int i = 0; i < total; ++i)
         peak = juce::jmax (peak, std::abs (samples[(size_t) i]));
 
-    // Переходы через ноль вверх с гистерезисом: перед переходом сигнал должен уйти заметно ниже нуля,
-    // иначе шум около нуля даёт ложные срабатывания. Берём последний переход в зоне.
-    const float threshold = 0.08f * peak;
-    float trigger = 0.0f, previousTrigger = -1.0f;
-    bool armed = false, found = false;
-
-    for (int i = 1; i < search; ++i)
+    // Настоящий период - автокорреляцией по свежей части буфера; окно покрывает целое число таких периодов
+    // Период меняется медленно: считаем его раз в несколько кадров и сразу при смене ноты
+    if (nominal != periodNominal || --periodCountdown <= 0)
     {
-        const float a = samples[(size_t) i - 1], b = samples[(size_t) i];
-
-        if (b < -threshold)
-            armed = true;
-
-        if (armed && a < 0.0f && b >= 0.0f)
-        {
-            // Точное место перехода между сэмплами: без него высокие ноты дрожат на один сэмпл
-            if (found)
-                previousTrigger = trigger;
-
-            trigger = (float) (i - 1) + a / (a - b);
-            found = true;
-            armed = false;
-        }
+        const int recent = juce::jmin (total, juce::roundToInt (nominal * 12.0f) + 16);
+        const float measured = ScopeTrigger::measurePeriod (samples.data() + total - recent, recent, nominal);
+        cachedPeriod = measured > 0.0f ? measured : nominal;
+        periodNominal = nominal;
+        periodCountdown = 6;
     }
 
-    // Если в зоне нашлись два перехода, период известен точно: окно покрывает целое число настоящих периодов
-    if (found && previousTrigger >= 0.0f)
-    {
-        const float measured = trigger - previousTrigger;
-        if (measured > period * 0.8f && measured < period * 1.25f)
-        {
-            const float cycles = juce::jmax (1.0f, std::round ((float) window / measured));
-            window = juce::jlimit (64, juce::jmin (4096, maxWindow), juce::roundToInt (cycles * measured));
-            period = measured;
-        }
-    }
+    const float period = cachedPeriod;
+    // Не меньше двух периодов ноты: с сабом (период вдвое длиннее) это один настоящий период
+    const float cycles = juce::jlimit (period > nominal * 1.5f ? 1.0f : 2.0f, 12.0f, std::ceil (400.0f / period));
+    const int window = juce::jlimit (64, 4096, juce::roundToInt (cycles * period));
+    const int search = total - window - 2;
+
+    // Начало окна. У сложной формы несколько переходов через ноль за период, и выбор между ними от кадра
+    // к кадру заставлял картинку прыгать. Поэтому: пока звучит та же нота - по сходству с прошлым кадром;
+    // первый кадр ноты - по фазе основной гармоники; если основной тон слишком слаб - по переходу через ноль.
+    const bool sameNote = havePreviousShape && std::abs (period - previousNominal) < period * 0.02f && peak > 1.0e-4f;
+
+    ScopeTrigger::Result start;
+    if (sameNote)
+        start = ScopeTrigger::byContinuity (samples.data(), total, search, period, window, previousShape.data(), kShapePoints);
+    if (! start.found)
+        start = ScopeTrigger::byFundamental (samples.data(), total, search, period, window);
+    if (! start.found)
+        start = ScopeTrigger::byZeroCrossing (samples.data(), search, period, peak);
+
+    const float trigger = start.found ? juce::jlimit (0.0f, (float) (total - window - 2), start.trigger) : 0.0f;
+
+    ScopeTrigger::sampleShape (samples.data(), trigger, period, previousShape.data(), kShapePoints);
+    previousNominal = period;
+    havePreviousShape = peak > 1.0e-4f;
 
     float windowPeak = 0.0f;
     const int first = (int) trigger;
@@ -215,33 +211,62 @@ bool ScopeView::buildRoll (juce::Rectangle<float> plot, juce::Path& trace, juce:
     const float seconds = rollWindows[juce::jlimit (0, kNumRollWindows - 1, Settings::get().scopeWindow)];
     const int wanted = juce::roundToInt (seconds * sampleRate);
 
-    // Короткое окно рисуется по сэмплам, длинное - по огибающей "минимум-максимум"
-    int count = 0;
+    // Короткое окно рисуется по сэмплам, длинное - по огибающей "минимум-максимум" (пары на kPeakHop сэмплов)
     const bool raw = wanted <= ScopeBuffer::kSize - 64;
+    const int unit = raw ? 1 : ScopeBuffer::kPeakHop;
+    const int capacity = raw ? ScopeBuffer::kSize : ScopeBuffer::kNumPeaks;
+    const int elements = juce::jmin (capacity - 64, wanted / unit);
 
-    if (raw)
-    {
-        count = wanted;
-        scope.copyLatest (samples.data(), count);
-    }
-    else
-    {
-        count = juce::jmin (ScopeBuffer::kNumPeaks, wanted / ScopeBuffer::kPeakHop);
-        scope.copyLatestPeaks (samples.data(), samplesRight.data(), count);
-    }
+    // Столбец экрана - целое число элементов, и столбцы привязаны к абсолютному времени: волна сдвигается
+    // на целые столбцы, а уже нарисованные столбцы не меняются. Иначе край буфера каждый кадр сдвигался
+    // на случайное число сэмплов, минимум и максимум в столбцах "гуляли", и густой бас мерцал муаром.
+    const int columns = juce::jmax (2, (int) plot.getWidth());
+    const int bucket = juce::jmax (1, juce::roundToInt ((float) elements / (float) columns));
+    const int buckets = juce::jmax (2, elements / bucket);
+    const int count = juce::jmin (capacity - 1, (buckets + 1) * bucket);
 
-    if (count < 2)
-        return false;
+    const auto endIndex = raw ? scope.copyLatestAligned (samples.data(), count)
+                              : scope.copyLatestPeaksAligned (samples.data(), samplesRight.data(), count);
 
     const float* minimums = samples.data();
     const float* maximums = raw ? samples.data() : samplesRight.data();
 
-    // По столбцам экрана: в каждом минимум и максимум
-    const int columns = juce::jmax (2, (int) plot.getWidth());
-    float peak = 0.0f;
+    std::vector<float> lows ((size_t) buckets), highs ((size_t) buckets);
+    if (! ScopeTrigger::rollColumns (minimums, maximums, count, endIndex, bucket, buckets, lows.data(), highs.data()))
+        return false;
 
-    for (int i = 0; i < count; ++i)
-        peak = juce::jmax (peak, std::abs (minimums[i]), std::abs (maximums[i]));
+    float peak = 0.0f;
+    for (int b = 0; b < buckets; ++b)
+        peak = juce::jmax (peak, std::abs (lows[(size_t) b]), std::abs (highs[(size_t) b]));
+
+    // Период ноты укладывается меньше чем в восемь столбцов: верхняя и нижняя линии переплетаются в сетку.
+    // Тогда рисуем огибающую за два периода - сплошную форму, как у высоких нот
+    const float frequency = scope.noteFrequency.load();
+    if (frequency > 0.0f)
+    {
+        const float periodColumns = sampleRate / frequency / (float) (unit * bucket);
+        if (periodColumns < 8.0f)
+        {
+            const int half = juce::jmax (1, (int) std::ceil (periodColumns));
+            std::vector<float> spreadLows ((size_t) buckets), spreadHighs ((size_t) buckets);
+
+            for (int b = 0; b < buckets; ++b)
+            {
+                float low = lows[(size_t) b], high = highs[(size_t) b];
+                for (int k = juce::jmax (0, b - half); k <= juce::jmin (buckets - 1, b + half); ++k)
+                {
+                    low = juce::jmin (low, lows[(size_t) k]);
+                    high = juce::jmax (high, highs[(size_t) k]);
+                }
+
+                spreadLows[(size_t) b] = low;
+                spreadHighs[(size_t) b] = high;
+            }
+
+            lows = std::move (spreadLows);
+            highs = std::move (spreadHighs);
+        }
+    }
 
     followGain (peak, 0.9f, 0.04f);
 
@@ -252,27 +277,17 @@ bool ScopeView::buildRoll (juce::Rectangle<float> plot, juce::Path& trace, juce:
     };
 
     std::vector<juce::Point<float>> lowerPoints;
-    lowerPoints.reserve ((size_t) columns);
+    lowerPoints.reserve ((size_t) buckets);
 
-    for (int column = 0; column < columns; ++column)
+    for (int b = 0; b < buckets; ++b)
     {
-        const int from = (int) ((juce::int64) column * count / columns);
-        const int to = juce::jmax (from + 1, (int) ((juce::int64) (column + 1) * count / columns));
-        float low = minimums[from], high = maximums[from];
+        const float x = plot.getX() + plot.getWidth() * (float) b / (float) (buckets - 1);
+        lowerPoints.emplace_back (x, yFor (lows[(size_t) b]));
 
-        for (int i = from + 1; i < juce::jmin (to, count); ++i)
-        {
-            low = juce::jmin (low, minimums[i]);
-            high = juce::jmax (high, maximums[i]);
-        }
-
-        const float x = plot.getX() + plot.getWidth() * (float) column / (float) (columns - 1);
-        lowerPoints.emplace_back (x, yFor (low));
-
-        if (column == 0)
-            trace.startNewSubPath (x, yFor (high));
+        if (b == 0)
+            trace.startNewSubPath (x, yFor (highs[(size_t) b]));
         else
-            trace.lineTo (x, yFor (high));
+            trace.lineTo (x, yFor (highs[(size_t) b]));
     }
 
     // Заливка между верхней и нижней огибающими, обводка по обеим

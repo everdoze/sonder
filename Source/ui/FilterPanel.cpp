@@ -168,12 +168,25 @@ void FilterPanel::timerCallback()
                                       (juce::Component*) vowelControl.get(), (juce::Component*) envControl.get(),
                                       (juce::Component*) keyTrackControl.get(), (juce::Component*) velocityControl.get() })
     {
-        const float alpha = control == vowelControl.get() && ! vowelMode ? base * 0.4f : base;
-        if (control->getAlpha() != alpha)
-            control->setAlpha (alpha);
+        setDimmed (*control, control == vowelControl.get() && ! vowelMode ? base * 0.4f : base);
     }
 
-    repaint();
+    repaintTabLeds();
+}
+
+void FilterPanel::repaintTabLeds()
+{
+    uint32_t mask = 0;
+    for (int i = 0; i < kNumFilters; ++i)
+        if (isOn (i))
+            mask |= 1u << i;
+
+    if (mask == ledMask)
+        return;
+
+    ledMask = mask;
+    for (auto& tab : tabs)
+        repaint (tab.getBounds());
 }
 
 void FilterPanel::resized()

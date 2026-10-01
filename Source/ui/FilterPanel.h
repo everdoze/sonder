@@ -52,6 +52,8 @@ private:
     std::unique_ptr<ParameterControl> cutoffControl, resonanceControl, driveControl, vowelControl,
                                       envControl, keyTrackControl, velocityControl;
     int selected = 0;
+    void repaintTabLeds();
+    uint32_t ledMask = ~0u; // какие огоньки на вкладках горят: перерисовываем вкладки, только когда это меняется
 };
 
 } // namespace sonder::ui

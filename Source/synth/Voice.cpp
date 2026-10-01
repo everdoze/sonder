@@ -10,6 +10,13 @@ namespace
 {
     constexpr int kControlInterval = 16;
 
+    // Модуляция, срез фильтра, высота и частоты осцилляторов пересчитываются с частотой ~24 кГц
+    // (при внутренних 96 кГц - раз в 4 сэмпла): плавнее, чем слышно, а экспоненты и тангенсы в разы реже
+    constexpr double kFastRate = 24000.0;
+
+    // Джиттер - шум полосой ~150 Гц: новая точка с частотой ~12 кГц и линейная интерполяция между ними
+    constexpr double kJitterRate = 12000.0;
+
     // Максимумы при ручках на 100 %. Дрейф и джиттер заданы как СКО отклонения.
     constexpr float kMaxDriftCents = 10.0f;
     constexpr float kMaxCutoffDriftOctaves = 0.2f;
@@ -64,6 +71,8 @@ void Voice::prepare (double newSampleRate)
     piOverSampleRate = (float) (juce::MathConstants<double>::pi / newSampleRate);
     maxCutoff = (float) (0.45 * newSampleRate);
     stealFadeLength = juce::jmax (8, juce::roundToInt (kStealFadeSeconds * sampleRate));
+    fastInterval = juce::jmax (1, juce::roundToInt (newSampleRate / kFastRate));
+    const int jitterInterval = juce::jmax (1, juce::roundToInt (newSampleRate / kJitterRate));
 
     // Таблицы классических форм создаются здесь, а не при первом звуке в аудиопотоке
     Wavetables::classicSaw();
@@ -87,7 +96,7 @@ void Voice::prepare (double newSampleRate)
             layer.osc[o].setPhase (random.nextFloat());
             layer.drift[o].prepare (controlRate, driftRates[o], seed(), 2);
             // Дрожание медленнее, чем раньше (было 800 Гц): даёт живость, но не шумовые боковые полосы у гармоник
-            layer.jitter[o].prepare (newSampleRate, 150.0f, seed(), 1);
+            layer.jitter[o].prepare (newSampleRate, 150.0f, seed(), jitterInterval);
         }
     }
 
@@ -104,6 +113,42 @@ void Voice::prepare (double newSampleRate)
     kill();
 
     parameterSmoothingCoef = (float) (1.0 - std::exp (-1.0 / (0.005 * newSampleRate)));
+    fastSmoothingCoef = (float) (1.0 - std::exp (-(double) fastInterval / (0.005 * newSampleRate)));
+
+    // Ручки доезжают до нового положения примерно за 10 мс (шаг раз в kControlInterval сэмплов)
+    controlSmoothingCoef = (float) (1.0 - std::exp (-(double) kControlInterval / (0.01 * newSampleRate)));
+}
+
+bool Voice::smoothParameters (SynthParams& p, const SynthParams& target, bool snap) noexcept
+{
+    // Значения цели по тому же порядку, что и в p
+    std::array<float, SynthParams::kNumSmoothed> goals {};
+    SynthParams::forEachSmoothed (target, [&goals] (int index, const float& value) { goals[(size_t) index] = value; });
+
+    bool moving = false;
+    SynthParams::forEachSmoothed (p, [&] (int index, float& value)
+    {
+        auto& state = smoothed[(size_t) index];
+        const float goal = goals[(size_t) index];
+
+        if (snap || std::abs (goal - state) < 1.0e-5f * (1.0f + std::abs (goal)))
+        {
+            state = goal;
+        }
+        else
+        {
+            state += (goal - state) * controlSmoothingCoef;
+            moving = true;
+        }
+
+        value = state;
+    });
+
+    // Точная расстройка входит в общий сдвиг осциллятора в центах
+    for (size_t o = 0; o < p.oscs.size(); ++o)
+        p.oscs[o].offsetCents = target.oscs[o].offsetCents - target.oscs[o].fineCents + p.oscs[o].fineCents;
+
+    return moving;
 }
 
 void Voice::start (int midiNote, float pitch, float noteVelocity, float glideFromPitch, bool retriggerEnvelopes,
@@ -358,10 +403,15 @@ void Voice::updateLfoPoints (int lfo, const ModulationBus& bus, const float* mod
 }
 
 void Voice::render (float* left, float* right, int startSample, int numSamples,
-                    const SynthParams& p, const ModulationBus& bus, const Tolerances& tol) noexcept
+                    const SynthParams& target, const ModulationBus& bus, const Tolerances& tol) noexcept
 {
     if (! active || numSamples <= 0)
         return;
+
+    // Копия параметров, в которой непрерывные ручки плавно подъезжают к положениям из target.
+    // Голос, который был тихим, сразу встаёт на место.
+    SynthParams p = target;
+    smoothing = smoothParameters (p, target, snapParameters);
 
     constexpr auto numOscs = (size_t) kNumOscs;
     constexpr auto numSources = (size_t) ModSource::count;
@@ -485,6 +535,12 @@ void Voice::render (float* left, float* right, int startSample, int numSamples,
     std::array<float, numDests> mod {};
     const int endSample = startSample + numSamples;
 
+    // Высота и частоты осцилляторов (пересчитываются раз в fastInterval сэмплов, см. цикл)
+    float baseFrequency = 440.0f;
+    std::array<float, numOscs> frequency {}, level {}, pulseWidth {}, wtPosition {};
+    std::array<float, kNumLfos> lfoRateScale {};
+    int fastCountdown = 0;
+
     for (int i = startSample; i < endSample; ++i)
     {
         // Фейд при краже голоса
@@ -515,32 +571,44 @@ void Voice::render (float* left, float* right, int startSample, int numSamples,
         pressureValue += (pressureTarget - pressureValue) * parameterSmoothingCoef;
         slideValue += (slideTarget - slideValue) * parameterSmoothingCoef;
 
-        // Источники модуляции
-        for (int l = 0; l < kNumLfos; ++l)
+        // Модуляция, высота и фильтры - раз в fastInterval сэмплов; между точками значения держатся
+        const bool fastTick = --fastCountdown <= 0;
+        if (fastTick)
         {
-            if (! lfoUsed[(size_t) l])
-                continue;
+            fastCountdown = fastInterval;
 
-            const auto& state = lfoStates[(size_t) l];
-            source[(size_t) sourceForLfo (l)] = lfoPointsModulated[(size_t) l]
-                                                  ? LfoMath::evaluatePoints (state.points.data(), state.numPoints, state.phase)
-                                                  : LfoMath::evaluate (p.lfos[(size_t) l].shape, state.phase, state.cycle,
-                                                                       state.seed, bus.lfoTables[(size_t) l]);
-        }
+            // Источники модуляции
+            for (int l = 0; l < kNumLfos; ++l)
+            {
+                if (! lfoUsed[(size_t) l])
+                    continue;
 
-        source[(size_t) ModSource::filterEnv] = filterEnv;
-        source[(size_t) ModSource::ampEnv] = ampEnv;
-        source[(size_t) ModSource::modWheel] = bus.modWheel[i];
-        source[(size_t) ModSource::aftertouch] = std::max (bus.aftertouch[i], pressureValue);
-        source[(size_t) ModSource::slide] = slideValue;
+                const auto& state = lfoStates[(size_t) l];
+                source[(size_t) sourceForLfo (l)] = lfoPointsModulated[(size_t) l]
+                                                      ? LfoMath::evaluatePoints (state.points.data(), state.numPoints, state.phase)
+                                                      : LfoMath::evaluate (p.lfos[(size_t) l].shape, state.phase, state.cycle,
+                                                                           state.seed, bus.lfoTables[(size_t) l]);
+            }
 
-        for (int u = 0; u < numUsed; ++u)
-            mod[(size_t) usedList[(size_t) u]] = 0.0f;
+            source[(size_t) ModSource::filterEnv] = filterEnv;
+            source[(size_t) ModSource::ampEnv] = ampEnv;
+            source[(size_t) ModSource::modWheel] = bus.modWheel[i];
+            source[(size_t) ModSource::aftertouch] = std::max (bus.aftertouch[i], pressureValue);
+            source[(size_t) ModSource::slide] = slideValue;
 
-        for (int s = 0; s < numSlots; ++s)
-        {
-            const auto& slot = slots[(size_t) s];
-            mod[(size_t) slot.dest] += source[(size_t) slot.source] * slot.scale + slot.offset;
+            for (int u = 0; u < numUsed; ++u)
+                mod[(size_t) usedList[(size_t) u]] = 0.0f;
+
+            for (int s = 0; s < numSlots; ++s)
+            {
+                const auto& slot = slots[(size_t) s];
+                mod[(size_t) slot.dest] += source[(size_t) slot.source] * slot.scale + slot.offset;
+            }
+
+            // Множитель скорости LFO от матрицы (экспонента - тоже здесь, а не на каждом сэмпле)
+            for (int l = 0; l < kNumLfos; ++l)
+                if (lfoRateModulated[(size_t) l])
+                    lfoRateScale[(size_t) l] = std::exp2 (mod[(size_t) rateDestForLfo (l)] * kModLfoRateOctaves);
         }
 
         // Ведущий голос отдаёт свои источники общим целям (рэк, Master)
@@ -559,9 +627,14 @@ void Voice::render (float* left, float* right, int startSample, int numSamples,
         {
             controlCounter = kControlInterval;
 
-            if (slowModulated)
+            // Ручки ещё в пути: подводим их и пересчитываем то, что от них зависит
+            const bool wasSmoothing = smoothing;
+            if (smoothing)
+                smoothing = smoothParameters (p, target, false);
+
+            if (slowModulated || wasSmoothing)
             {
-                updateSlowValues (p, bus, tol, mod.data(), used);
+                updateSlowValues (p, bus, tol, slowModulated ? mod.data() : displayModulation.data(), used);
                 distortionSettings = Distortion::makeSettings (p.distType, p.distDrive, p.distMix, slow.toneCoef);
             }
 
@@ -599,7 +672,7 @@ void Voice::render (float* left, float* right, int startSample, int numSamples,
 
             float increment = bus.lfoIncrement[(size_t) l];
             if (lfoRateModulated[(size_t) l])
-                increment *= std::exp2 (mod[(size_t) rateDestForLfo (l)] * kModLfoRateOctaves);
+                increment *= lfoRateScale[(size_t) l];
 
             state.phase += increment;
             if (state.phase >= 1.0f)
@@ -621,27 +694,29 @@ void Voice::render (float* left, float* right, int startSample, int numSamples,
         if (vibratoPhase >= 1.0f)
             vibratoPhase -= 1.0f;
 
-        const float pitch = currentPitch + bendValue + bus.pitchBend[i] + globalPitch
-                          + fastSinCycles (vibratoPhase) * slow.vibratoDepth * bus.modWheel[i]
-                          + mod[(size_t) ModDest::pitch] * kModPitchSemitones;
-
-        // Частота общая для всех осцилляторов, пока матрица не двигает высоту кого-то отдельно
-        const float baseFrequency = midiToHz (pitch);
-        const float pulseWidthMod = mod[(size_t) ModDest::pulseWidth] * kModPulseWidth;
-        std::array<float, numOscs> frequency {}, level {}, pulseWidth {}, wtPosition {};
-
-        for (size_t o = 0; o < numOscs; ++o)
+        if (fastTick)
         {
-            if (! oscRuns[o])
-                continue;
+            const float pitch = currentPitch + bendValue + bus.pitchBend[i] + globalPitch
+                              + fastSinCycles (vibratoPhase) * slow.vibratoDepth * bus.modWheel[i]
+                              + mod[(size_t) ModDest::pitch] * kModPitchSemitones;
 
-            const int osc = (int) o;
-            frequency[o] = pitchModulated[o] ? midiToHz (pitch + mod[(size_t) pitchDestForOsc (osc)] * kModPitchSemitones)
-                                             : baseFrequency;
-            lastFrequency[o] = frequency[o];
-            level[o] = oscHeard[o] ? std::clamp (p.oscs[o].level + mod[(size_t) levelDestForOsc (osc)], 0.0f, 1.0f) : 0.0f;
-            pulseWidth[o] = std::clamp (slow.pulseWidthBase[o] + pulseWidthMod, 0.05f, 0.95f);
-            wtPosition[o] = std::clamp (p.oscs[o].wtPos + mod[(size_t) wtPosDestForOsc (osc)], 0.0f, 1.0f);
+            // Частота общая для всех осцилляторов, пока матрица не двигает высоту кого-то отдельно
+            baseFrequency = midiToHz (pitch);
+            const float pulseWidthMod = mod[(size_t) ModDest::pulseWidth] * kModPulseWidth;
+
+            for (size_t o = 0; o < numOscs; ++o)
+            {
+                if (! oscRuns[o])
+                    continue;
+
+                const int osc = (int) o;
+                frequency[o] = pitchModulated[o] ? midiToHz (pitch + mod[(size_t) pitchDestForOsc (osc)] * kModPitchSemitones)
+                                                 : baseFrequency;
+                lastFrequency[o] = frequency[o];
+                level[o] = oscHeard[o] ? std::clamp (p.oscs[o].level + mod[(size_t) levelDestForOsc (osc)], 0.0f, 1.0f) : 0.0f;
+                pulseWidth[o] = std::clamp (slow.pulseWidthBase[o] + pulseWidthMod, 0.05f, 0.95f);
+                wtPosition[o] = std::clamp (p.oscs[o].wtPos + mod[(size_t) wtPosDestForOsc (osc)], 0.0f, 1.0f);
+            }
         }
 
         const float fm = std::clamp (p.fmAmount + mod[(size_t) ModDest::fm], 0.0f, 1.0f) * kFmDepth;
@@ -741,50 +816,61 @@ void Voice::render (float* left, float* right, int startSample, int numSamples,
         {
             const auto& fp = p.filters[f];
             auto& stage = filters[f];
-            const auto dests = destsForFilter ((int) f);
 
-            stage.smoothedCutoff += (stage.baseCutoff - stage.smoothedCutoff) * parameterSmoothingCoef;
-            stage.smoothedResonance += (fp.resonance - stage.smoothedResonance) * parameterSmoothingCoef;
-
-            if (std::abs (fp.drive - stage.smoothedDrive) < 1.0e-5f)
-                stage.smoothedDrive = fp.drive;
-            else
-                stage.smoothedDrive += (fp.drive - stage.smoothedDrive) * parameterSmoothingCoef;
-
-            const float cutoffOctaves = filterEnv * stage.envOctaves
-                                      + mod[(size_t) dests.cutoff] * kModCutoffOctaves
-                                      + cutoffDriftValue * slow.cutoffDriftOctaves;
-            const float cutoffHz = stage.smoothedCutoff * std::exp2 (cutoffOctaves);
-            const float resonance = std::clamp (stage.smoothedResonance + mod[(size_t) dests.resonance], 0.0f, 1.0f);
-
-            // Усиление драйва пересчитываем, только когда значение реально меняется
-            const float drive = std::clamp (stage.smoothedDrive + mod[(size_t) dests.drive], 0.0f, 1.0f);
-            if (drive != stage.cachedDrive)
+            // Срез, резонанс, драйв и коэффициенты - раз в fastInterval сэмплов
+            if (fastTick)
             {
-                stage.cachedDrive = drive;
-                stage.driveGain = driveToGain (drive);
-                stage.makeup = 1.0f / std::sqrt (stage.driveGain);
-            }
+                const auto dests = destsForFilter ((int) f);
 
-            stage.displayCutoff = cutoffHz;
+                stage.smoothedCutoff += (stage.baseCutoff - stage.smoothedCutoff) * fastSmoothingCoef;
+                stage.smoothedResonance += (fp.resonance - stage.smoothedResonance) * fastSmoothingCoef;
+
+                if (std::abs (fp.drive - stage.smoothedDrive) < 1.0e-5f)
+                    stage.smoothedDrive = fp.drive;
+                else
+                    stage.smoothedDrive += (fp.drive - stage.smoothedDrive) * fastSmoothingCoef;
+
+                const float cutoffOctaves = filterEnv * stage.envOctaves
+                                          + mod[(size_t) dests.cutoff] * kModCutoffOctaves
+                                          + cutoffDriftValue * slow.cutoffDriftOctaves;
+                const float cutoffHz = stage.smoothedCutoff * std::exp2 (cutoffOctaves);
+                const float resonance = std::clamp (stage.smoothedResonance + mod[(size_t) dests.resonance], 0.0f, 1.0f);
+
+                // Усиление драйва пересчитываем, только когда значение реально меняется
+                const float drive = std::clamp (stage.smoothedDrive + mod[(size_t) dests.drive], 0.0f, 1.0f);
+                if (drive != stage.cachedDrive)
+                {
+                    stage.cachedDrive = drive;
+                    stage.driveGain = driveToGain (drive);
+                    stage.makeup = 1.0f / std::sqrt (stage.driveGain);
+                }
+
+                stage.displayCutoff = cutoffHz;
+
+                if (fp.vowelMode)
+                {
+                    // Срез сдвигает форманты: выше - "меньше голова", ниже - "больше"
+                    const float vowel = std::clamp (fp.vowel + mod[(size_t) dests.vowel], 0.0f, 1.0f);
+                    const float shiftOctaves = std::clamp (0.4f * std::log2 (cutoffHz / 1000.0f), -1.0f, 1.0f);
+                    stage.formantCoefficients = FormantFilter::makeCoefficients (vowel, std::exp2 (shiftOctaves), resonance,
+                                                                                 piOverSampleRate, maxCutoff);
+                    stage.displayVowel = vowel;
+                }
+                else
+                {
+                    stage.ladderCoefficients = LadderFilter::makeCoefficients (cutoffHz, resonance, fp.mode, piOverSampleRate, maxCutoff);
+                }
+            }
 
             if (fp.vowelMode)
             {
-                // Срез сдвигает форманты: выше - "меньше голова", ниже - "больше"
-                const float vowel = std::clamp (fp.vowel + mod[(size_t) dests.vowel], 0.0f, 1.0f);
-                const float shiftOctaves = std::clamp (0.4f * std::log2 (cutoffHz / 1000.0f), -1.0f, 1.0f);
-                const auto coefficients = FormantFilter::makeCoefficients (vowel, std::exp2 (shiftOctaves), resonance,
-                                                                           piOverSampleRate, maxCutoff);
-                stage.displayVowel = vowel;
-
-                outLeft = stage.formantLeft.process (inLeft, coefficients, stage.driveGain);
-                outRight = stereo ? stage.formantRight.process (inRight, coefficients, stage.driveGain) : outLeft;
+                outLeft = stage.formantLeft.process (inLeft, stage.formantCoefficients, stage.driveGain);
+                outRight = stereo ? stage.formantRight.process (inRight, stage.formantCoefficients, stage.driveGain) : outLeft;
             }
             else
             {
-                const auto coefficients = LadderFilter::makeCoefficients (cutoffHz, resonance, piOverSampleRate, maxCutoff);
-                outLeft = stage.left.process (inLeft, coefficients, stage.driveGain, fp.mode);
-                outRight = stereo ? stage.right.process (inRight, coefficients, stage.driveGain, fp.mode) : outLeft;
+                outLeft = stage.left.process (inLeft, stage.ladderCoefficients, stage.driveGain);
+                outRight = stereo ? stage.right.process (inRight, stage.ladderCoefficients, stage.driveGain) : outLeft;
             }
 
             outLeft *= stage.makeup;
@@ -836,8 +922,8 @@ void Voice::render (float* left, float* right, int startSample, int numSamples,
         // Остаток блока рендерим заново, потому что поблочные значения зависят от ноты и velocity.
         if (pendingNote >= 0 && (stealFadeLeft == 0 || ! ampEnvelope.isActive()))
         {
-            launchPendingNote (p, bus, i + 1);
-            render (left, right, i + 1, endSample - (i + 1), p, bus, tol);
+            launchPendingNote (target, bus, i + 1);
+            render (left, right, i + 1, endSample - (i + 1), target, bus, tol);
             return;
         }
 
